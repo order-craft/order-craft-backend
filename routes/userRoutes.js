@@ -37,22 +37,22 @@ router.put("/changepwd", verifyToken, changePassword);
 router.post(
   "/client/pwd-verification-code",
   verifySuperClient,
-  sendChangePwdVerifCode
+  sendChangePwdVerifCode,
 );
 router.post(
   "/client/change-password",
   verifySuperClient,
-  changeSuperClientPassword
+  changeSuperClientPassword,
 );
 router.post(
   "/client/personal-details-change",
   verifySuperClient,
-  sendChangePersonalDettailsVerifCode
+  sendChangePersonalDettailsVerifCode,
 );
 router.post(
   "/client/verify-pd-change-code",
   verifySuperClient,
-  changeSuperClientPD
+  changeSuperClientPD,
 );
 router.post("/verifyUser", CodeVerification);
 router.post("/resendcode", resendCode);
@@ -63,22 +63,25 @@ router.post("/login-qr", qrLogin);
 router.get(
   "/superClient/getUsers",
   verifySuperClient,
-  getClientsBySuperClientId
+  getClientsBySuperClientId,
 );
 router.post("/superClient/create-user", verifySuperClient, createUser);
 router.post(
   "/superClient/change-profile",
   verifySuperClient,
-  uploadProfileImage
+  uploadProfileImage,
 );
 router.post(
   "/superClient/update-business-details",
   verifySuperClient,
-  updateBusinessDetails
+  updateBusinessDetails,
 );
 
 router.delete("/superClient/:id", verifySuperClient, deleteUser);
-router.put("/superClient/:id", verifySuperClient, updateUser);
-router.patch("/superClient/:id/verify", changeUserVerificationStatus);
-
+router.put("/superClient/update-user/:id", verifySuperClient, updateUser);
+router.patch(
+  "/superClient/:id/verify",
+  verifySuperClient,
+  changeUserVerificationStatus,
+);
 module.exports = router;

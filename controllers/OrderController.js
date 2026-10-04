@@ -96,7 +96,7 @@ const createOrder = async (req, res) => {
       const counter = await OrderCounter.findOneAndUpdate(
         { date: todayKey },
         { $inc: { seq: 1 } },
-        { new: true, upsert: true, setDefaultsOnInsert: true, session }
+        { new: true, upsert: true, setDefaultsOnInsert: true, session },
       );
       orderNumber = counter.seq;
     }
@@ -104,7 +104,7 @@ const createOrder = async (req, res) => {
     // 4️⃣ Verify products exist & availability
     const productIds = products.map((p) => p.product);
     const existing = await Product.find({ _id: { $in: productIds } }).session(
-      session
+      session,
     );
     if (existing.length !== products.length) {
       return res.status(404).json({ error: "One or more products not found" });
@@ -256,7 +256,7 @@ const getOrder = async (req, res) => {
   } catch (error) {
     logger.error(
       `Error fetching order with ID ${req.params.orderId}: ${error.message}`,
-      error
+      error,
     );
     res.status(500).json({ error: "Internal server error" });
   }
@@ -268,10 +268,13 @@ const updateOrder = async (req, res) => {
     const { products, table, status, payed, comment } = req.body;
     const superClientId = req.superClientId;
     if (products && products.length === 0) {
-      const deletedOrder = await Order.findByIdAndDelete(orderId);
+      const deletedOrder = await Order.findOneAndDelete({
+        _id: orderId,
+        superClientId,
+      });
       if (!deletedOrder) {
         logger.warn(
-          `Order with ID ${orderId} not found when attempting to delete`
+          `Order with ID ${orderId} not found when attempting to delete`,
         );
         return res.status(404).json({ error: "Order not found" });
       }
@@ -295,14 +298,16 @@ const updateOrder = async (req, res) => {
       updateData.totalPrice = totalPrice;
     }
 
-    const order = await Order.findByIdAndUpdate(orderId, updateData, {
-      new: true,
-    })
+    const order = await Order.findOneAndUpdate(
+      { _id: orderId, superClientId },
+      updateData,
+      { new: true },
+    )
       .populate("products.product")
       .populate("table");
     if (!order) {
       logger.warn(
-        `Order with ID ${orderId} not found when attempting to update`
+        `Order with ID ${orderId} not found when attempting to update`,
       );
       return res.status(404).json({ error: "Order not found" });
     }
@@ -314,7 +319,7 @@ const updateOrder = async (req, res) => {
   } catch (error) {
     logger.error(
       `Error updating order with ID ${req.params.orderId}: ${error.message}`,
-      error
+      error,
     );
     res.status(500).json({ error: "Internal server error" });
   }
@@ -324,16 +329,18 @@ const deleteOrder = async (req, res) => {
   try {
     const orderId = req.params.orderId;
     const superClientId = req.superClientId;
-    const order = await Order.findById(orderId);
+    const order = await Order.findOne({
+      _id: orderId,
+      superClientId,
+    });
     if (!order) {
       logger.warn(
-        `Order with ID ${orderId} not found when attempting to delete`
+        `Order with ID ${orderId} not found when attempting to delete`,
       );
       return res.status(404).json({ error: "Order not found" });
     }
 
-    await Order.findByIdAndDelete(orderId);
-
+    await Order.findOneAndDelete({ _id: orderId, superClientId });
     // Remove the order reference from the table
     await Table.findByIdAndUpdate(order.table, {
       $pull: { orders: orderId },
@@ -347,7 +354,7 @@ const deleteOrder = async (req, res) => {
   } catch (error) {
     logger.error(
       `Error deleting order with ID ${req.params.orderId}: ${error.message}`,
-      error
+      error,
     );
     res.status(500).json({ error: "Internal server error" });
   }
@@ -361,13 +368,13 @@ const rateOrderProducts = async (req, res) => {
     const order = await Order.findById(orderId).populate("products.product");
     if (!order) {
       logger.warn(
-        `Order with ID ${orderId} not found when attempting to rate products`
+        `Order with ID ${orderId} not found when attempting to rate products`,
       );
       return res.status(404).json({ error: "Order not found" });
     }
 
     const productsRated = order.products.filter(({ product }) =>
-      ratings.hasOwnProperty(product._id.toString())
+      ratings.hasOwnProperty(product._id.toString()),
     );
 
     for (let { product } of productsRated) {
@@ -386,7 +393,7 @@ const rateOrderProducts = async (req, res) => {
   } catch (error) {
     logger.error(
       `Error rating products for order ${req.params.orderId}: ${error.message}`,
-      error
+      error,
     );
     res.status(500).json({ error: "Internal server error" });
   }
@@ -409,7 +416,7 @@ const tipOrder = async (req, res) => {
     const order = await Order.findById(orderId);
     if (!order) {
       logger.warn(
-        `Order with ID ${orderId} not found when attempting to rate products`
+        `Order with ID ${orderId} not found when attempting to rate products`,
       );
       return res.status(404).json({ error: "Order not found" });
     }
@@ -422,7 +429,7 @@ const tipOrder = async (req, res) => {
   } catch (error) {
     logger.error(
       `Error adding tips for order ${req.params.orderId}: ${error.message}`,
-      error
+      error,
     );
     res.status(500).json({ error: "Internal server error" });
   }
@@ -440,7 +447,7 @@ const confirmSelectedPayments = async (req, res) => {
       return res.status(400).json({ message: "No valid order IDs provided" });
     }
     const validOrderIds = orderIds.filter((id) =>
-      mongoose.Types.ObjectId.isValid(id)
+      mongoose.Types.ObjectId.isValid(id),
     );
     if (validOrderIds.length === 0) {
       console.warn("No valid order IDs found");
@@ -468,6 +475,7 @@ const confirmSelectedPayments = async (req, res) => {
         const orders = await Order.find({
           _id: { $in: validOrderIds },
           payed: false,
+          superId,
         })
           .session(session)
           .populate("superClientId");
@@ -492,14 +500,14 @@ const confirmSelectedPayments = async (req, res) => {
               await bill.save({ session });
             } else {
               console.warn(
-                `No bill found for superClient ${order.superClientId}`
+                `No bill found for superClient ${order.superClientId}`,
               );
             }
           }
 
           // Set payment methods
           const hasSomeProductWithPaymentMethod = order.products.some(
-            (p) => p.paymentMethod
+            (p) => p.paymentMethod,
           );
           const hasSomeWithout = order.products.some((p) => !p.paymentMethod);
 
@@ -546,7 +554,7 @@ const confirmSelectedPayments = async (req, res) => {
             await Order.updateMany(
               { table: tableId },
               { $set: { status: "archived" } },
-              { session }
+              { session },
             );
             console.log(`Orders for table ${tableId} archived.`);
           }
@@ -616,7 +624,11 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
 
       await session.withTransaction(async () => {
         // 4. Fetch the unpaid order and populate superClientId within the transaction
-        const order = await Order.findOne({ _id: orderId, payed: false })
+        const order = await Order.findOne({
+          _id: orderId,
+          payed: false,
+          superClientId,
+        })
           .session(session)
           .populate("superClientId");
         if (!order) {
@@ -631,14 +643,14 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
         const superClientId = order.superClientId;
         if (superClientId) {
           const bill = await Bill.findOne({ client: superClientId }).session(
-            session
+            session,
           );
           if (bill) {
             const commission = order.totalPrice * 0.04;
             bill.totalAmount += commission;
             await bill.save({ session });
             console.log(
-              `Updated bill for superClient ${superClientId}. New total: ${bill.totalAmount}`
+              `Updated bill for superClient ${superClientId}. New total: ${bill.totalAmount}`,
             );
           } else {
             console.warn(`No bill found for superClient ${superClientId}`);
@@ -706,6 +718,8 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
 const confirmSelectedNotDineinProductsPayments = async (req, res) => {
   const { orderId, productIds, paymentMethod } = req.body;
   const superID = req.userId;
+  const superClientId = req.superClientId;
+
   try {
     // Basic validation
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
@@ -740,7 +754,10 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 
       await session.withTransaction(async () => {
         // Find the order within the transaction
-        const order = await Order.findById(orderId)
+        const order = await Order.findOne({
+          _id: orderId,
+          superClientId: req.superClientId,
+        })
           .session(session)
           .populate("superClientId");
         if (!order) {
@@ -756,7 +773,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
         order.products = order.products.map((product) => {
           if (validProductIds.includes(product.product.toString())) {
             const selectedCount = productIds.filter(
-              (id) => id.split("-")[0] === product.product.toString()
+              (id) => id.split("-")[0] === product.product.toString(),
             ).length;
 
             if (product.payedQuantity < product.quantity) {
@@ -799,14 +816,14 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
           if (tempOrderForDecrement.status != "completed") {
             const decrementResult = await decrementForOrder(
               tempOrderForDecrement,
-              session
+              session,
             );
             if (decrementResult.warnings) {
               warnings = warnings.concat(decrementResult.warnings);
             }
             if (decrementResult.insufficientMaterials) {
               insufficientMaterials = insufficientMaterials.concat(
-                decrementResult.insufficientMaterials
+                decrementResult.insufficientMaterials,
               );
             }
           }
@@ -814,7 +831,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 
         // Check if all products are now fully paid
         const allProductsPaid = order.products.every(
-          (product) => product.payedQuantity >= product.quantity
+          (product) => product.payedQuantity >= product.quantity,
         );
 
         if (allProductsPaid) {
@@ -832,7 +849,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
               await bill.save({ session });
             } else {
               console.warn(
-                `No bill found for superClient ${order.superClientId._id}`
+                `No bill found for superClient ${order.superClientId._id}`,
               );
             }
           }
@@ -918,7 +935,11 @@ const confirmSelectedProductsPayments = async (req, res) => {
 
       await session.withTransaction(async () => {
         // Load order within transaction
-        const order = await Order.findById(orderId)
+        const order = await Order.findOne({
+          _id: orderId,
+          superClientId: req.superClientId,
+        })
+
           .session(session)
           .populate("superClientId");
         if (!order) {
@@ -932,7 +953,7 @@ const confirmSelectedProductsPayments = async (req, res) => {
           const prodIdStr = item.product.toString();
           if (validProductIds.includes(prodIdStr)) {
             const selectedCount = productIds.filter(
-              (rawId) => rawId.split("-")[0] === prodIdStr
+              (rawId) => rawId.split("-")[0] === prodIdStr,
             ).length;
             if (item.payedQuantity < item.quantity) {
               const remainingQuantity = item.quantity - item.payedQuantity;
@@ -949,7 +970,7 @@ const confirmSelectedProductsPayments = async (req, res) => {
 
         // Check if order is fully paid
         const allProductsPaid = order.products.every(
-          (item) => item.payedQuantity >= item.quantity
+          (item) => item.payedQuantity >= item.quantity,
         );
 
         if (allProductsPaid) {
@@ -965,7 +986,7 @@ const confirmSelectedProductsPayments = async (req, res) => {
               await bill.save({ session });
             } else {
               console.warn(
-                `No bill found for superClient ${order.superClientId._id}`
+                `No bill found for superClient ${order.superClientId._id}`,
               );
             }
           }
@@ -991,7 +1012,7 @@ const confirmSelectedProductsPayments = async (req, res) => {
           await Order.updateMany(
             { table: order.table },
             { $set: { status: "archived", user: superId } },
-            { session }
+            { session },
           );
         }
       }, transactionOptions);
@@ -1109,7 +1130,10 @@ const updateOrderStatus = async (req, res) => {
     await session.withTransaction(async () => {
       // Load order inside transaction
       // Inside your transaction, modify the findById line:
-      const order = await Order.findById(orderId)
+      const order = await Order.findOne({
+        _id: orderId,
+        superClientId,
+      })
         .populate("table")
         .populate("products.product")
         .session(session);
@@ -1141,7 +1165,7 @@ const updateOrderStatus = async (req, res) => {
     }, transactionOptions);
     // Refresh the order to ensure we have latest data
 
-    updatedOrder = await Order.findById(orderId)
+    updatedOrder = await Order.findOne({ _id: orderId, superClientId })
       .populate("table")
       .populate("products.product")
       .session(session);
@@ -1218,7 +1242,7 @@ const deleteCancelledOrders = async (req, res) => {
   } catch (error) {
     logger.error(
       `Error deleting cancelled orders for superClientId ${req.superClientId}: ${error.message}`,
-      error
+      error,
     );
     res.status(500).json({ error: "Internal server error" });
   }

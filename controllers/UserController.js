@@ -151,13 +151,13 @@ const sendChangePwdVerifCode = async (req, res) => {
           .json({ error: "Failed to send verification email" });
       } else {
         logger.info(
-          `Verification email sent successfully to ${email}: ${info.response}`
+          `Verification email sent successfully to ${email}: ${info.response}`,
         );
 
         // Save the verification code to the user document
         await User.updateOne(
           { _id: superClientId }, // Find the user by their ID
-          { $set: { changePwdCode: verificationCode } } // Update the changePwdCode field
+          { $set: { changePwdCode: verificationCode } }, // Update the changePwdCode field
         );
 
         return res.status(200).json({
@@ -206,7 +206,7 @@ const changeSuperClientPassword = async (req, res) => {
     await User.updateOne(
       { _id: superClientId }, // Find the user by their ID
       { password: hashedPassword },
-      { $unset: { changePwdCode: "" } } // Unset the changePwdCode field
+      { $unset: { changePwdCode: "" } }, // Unset the changePwdCode field
     );
 
     return res.status(200).json({
@@ -293,7 +293,7 @@ const sendChangePersonalDettailsVerifCode = async (req, res) => {
           .json({ error: "Failed to send verification email" });
       } else {
         logger.info(
-          `Verification email sent successfully to ${email}: ${info.response}`
+          `Verification email sent successfully to ${email}: ${info.response}`,
         );
         console.log(verificationCode);
         // Save the verification code to the user document
@@ -305,7 +305,7 @@ const sendChangePersonalDettailsVerifCode = async (req, res) => {
               NewpersonalPhoneNumber: newpersonalPhoneNumber,
               changePDCode: verificationCode,
             },
-          }
+          },
         );
 
         return res.status(200).json({
@@ -356,7 +356,7 @@ const changeSuperClientPD = async (req, res) => {
           newPersonalPhoneNumber: "", // Remove newPersonalPhoneNumber
           changePDCode: "", // Remove changePDCode
         },
-      }
+      },
     );
 
     return res.status(200).json({
@@ -405,7 +405,7 @@ const resendCode = async (req, res) => {
     const user = await User.findById(userId);
     if (!user) {
       logger.warn(
-        `User with ID ${userId} not found for resending verification code`
+        `User with ID ${userId} not found for resending verification code`,
       );
       return res.status(404).json({ error: "Client not found" });
     }
@@ -462,7 +462,7 @@ const login = async (req, res) => {
     const token = jwt.sign(
       { userId: user._id, role: user.role },
       process.env.JWT_SECRET_KEY,
-      { expiresIn: "24h" }
+      { expiresIn: "24h" },
     );
 
     logger.info(`User ${email} logged in successfully`);
@@ -481,7 +481,7 @@ const getUserById = async (req, res) => {
 
     // Ne sélectionne que les champs non sensibles à renvoyer
     const user = await User.findById(userId).select(
-      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber"
+      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber",
     );
 
     if (!user) {
@@ -818,10 +818,10 @@ const loginTable = async (req, res) => {
       (err, token) => {
         if (err) throw err;
         logger.info(
-          `User ${email} logged in successfully to table ${tableNumber}`
+          `User ${email} logged in successfully to table ${tableNumber}`,
         );
         res.json({ token });
-      }
+      },
     );
   } catch (err) {
     logger.error("Server error in loginTable:", err);
@@ -893,7 +893,7 @@ const qrLogin = async (req, res) => {
           distance,
           placeLogo,
         });
-      }
+      },
     );
   } catch (err) {
     res.status(500).json({ message: "Server error", error: err.message });
@@ -962,7 +962,7 @@ const createUser = async (req, res) => {
     await newUser.save();
 
     logger.info(
-      `User ${email} created successfully by superClient ${req.superClientId}`
+      `User ${email} created successfully by superClient ${req.superClientId}`,
     );
     res
       .status(201)
@@ -975,10 +975,19 @@ const createUser = async (req, res) => {
 const deleteUser = async (req, res) => {
   try {
     const userId = req.params.id;
+    const superClientId = req.superClientId;
 
-    const user = await User.findByIdAndDelete(userId);
+    // Only delete users that belong to this superClient.
+    // A superClient cannot delete another superClient or themselves via this route.
+    const user = await User.findOneAndDelete({
+      _id: userId,
+      superClient: superClientId,
+      role: "client",
+    });
     if (!user) {
-      logger.warn(`User with ID ${userId} not found for deletion`);
+      logger.warn(
+        `User with ID ${userId} not found or not owned by superClient ${superClientId}`,
+      );
       return res.status(404).json({ message: "User not found" });
     }
 
@@ -993,6 +1002,7 @@ const changeUserVerificationStatus = async (req, res) => {
   try {
     const userId = req.params.id;
     const { verified } = req.body;
+    const superClientId = req.superClientId;
 
     if (typeof verified !== "boolean") {
       return res
@@ -1000,21 +1010,29 @@ const changeUserVerificationStatus = async (req, res) => {
         .json({ message: "Invalid 'verified' value. Must be a boolean." });
     }
 
-    const user = await User.findByIdAndUpdate(
-      userId,
+    // Ownership: user must exist and belong to this superClient
+    // (superClient can also toggle themselves, if needed)
+    const user = await User.findOneAndUpdate(
+      {
+        _id: userId,
+        $or: [
+          { superClient: superClientId },
+          { _id: superClientId, role: "superClient" },
+        ],
+      },
       { verified },
-      { new: true }
+      { new: true },
     );
 
     if (!user) {
       logger.warn(
-        `User with ID ${userId} not found for verification status update`
+        `User with ID ${userId} not found or not owned by superClient ${superClientId}`,
       );
       return res.status(404).json({ message: "User not found" });
     }
 
     logger.info(
-      `User with ID ${userId} verification status updated successfully`
+      `User with ID ${userId} verification status updated successfully`,
     );
     res
       .status(200)
@@ -1029,11 +1047,11 @@ const updateUser = async (req, res) => {
   try {
     const userId = req.params.id;
     const role = req.role;
+    const superClientId = req.superClientId;
     const {
       fullName,
       email,
       password,
-      superClient,
       phoneNumber,
       contractNumber,
       percentage,
@@ -1042,44 +1060,48 @@ const updateUser = async (req, res) => {
       latitude,
     } = req.body;
 
-    // Initialize update data with fields that can always be updated
+    // Load target user and verify ownership before touching anything
+    const target = await User.findOne({
+      _id: userId,
+      superClient: superClientId,
+    });
+    if (!target) {
+      logger.warn(
+        `User with ID ${userId} not found or not owned by superClient ${superClientId}`,
+      );
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // A superClient can only edit their own client staff through this route.
+    // Editing another superClient's profile, or their own superClient record,
+    // is not allowed here.
+    if (target.role !== "client") {
+      return res
+        .status(403)
+        .json({ message: "Cannot edit this user through this endpoint" });
+    }
+
+    // Only whitelist fields that a superClient is allowed to change on their staff
     const updateData = {};
     if (fullName) updateData.fullName = fullName;
     if (email) updateData.email = email;
-    if (role) updateData.role = role;
+    if (phoneNumber) updateData.phoneNumber = phoneNumber;
+    if (contractNumber) updateData.contractNumber = contractNumber;
+    if (percentage !== undefined) updateData.percentage = percentage;
+    if (placeName) updateData.placeName = placeName;
+    if (latitude && longitude) {
+      updateData.placeLocation = { lat: latitude, long: longitude };
+    }
 
-    // Handle password hashing if provided
+    // Password change, if provided
     if (password) {
       const saltRounds = 10;
-      const hashedPassword = await bcrypt.hash(password, saltRounds);
-      updateData.password = hashedPassword;
+      updateData.password = await bcrypt.hash(password, saltRounds);
     }
 
-    // Role-specific updates
-    if (role === "client") {
-      if (superClient !== undefined)
-        updateData.superClient = superClient || null; // Set to null if empty
-    } else if (role === "superClient") {
-      if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
-      if (contractNumber !== undefined)
-        updateData.contractNumber = contractNumber;
-      if (percentage !== undefined) updateData.percentage = percentage;
-      if (placeName !== undefined) updateData.placeName = placeName;
-
-      // Handle placeLocation update (latitude and longitude)
-      if (latitude && longitude) {
-        updateData.placeLocation = {
-          lat: latitude,
-          long: longitude,
-        };
-      }
-    }
-
-    // Update the user in the database
     const user = await User.findByIdAndUpdate(userId, updateData, {
       new: true,
     });
-
     if (!user) {
       logger.warn(`User with ID ${userId} not found for update`);
       return res.status(404).json({ message: "User not found" });
