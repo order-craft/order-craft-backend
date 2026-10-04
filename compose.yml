@@ -1,0 +1,15 @@
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    restart: always
+    ports:
+      - "27017:27017"  # Expose to host
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: saadliwissem88
+      MONGO_INITDB_ROOT_PASSWORD: 12715083w
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
