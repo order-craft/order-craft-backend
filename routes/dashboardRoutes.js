@@ -46,7 +46,7 @@ router.get("/weekly-revenue", verifySuperClient, getWeeklyRevenue);
 router.post(
   "/revenue-between-dates",
   verifySuperClient,
-  getRevenueBetweenDates
+  getRevenueBetweenDates,
 );
 
 // Route to get revenue by client
@@ -54,12 +54,12 @@ router.get("/revenue-by-client", verifySuperClient, getRevenueByClient);
 router.post(
   "/revenue-by-waiter-and-period",
   verifySuperClient,
-  getRevenueByWaiterAndPeriod
+  getRevenueByWaiterAndPeriod,
 );
 router.post(
   "/daily-revenue-per-waiter",
   verifySuperClient,
-  getDailyRevenuePerWaiter
+  getDailyRevenuePerWaiter,
 );
 
 // Route to get revenue by product
@@ -67,7 +67,7 @@ router.get("/revenue-by-product", verifySuperClient, getRevenueByProduct);
 router.get(
   "/revenue-by-product-by-month",
   verifySuperClient,
-  getRevenueByProductByMonth
+  getRevenueByProductByMonth,
 );
 
 // Route to get the most sold products
@@ -77,23 +77,23 @@ router.get("/revenue-year", verifySuperClient, getRevenueForCurrentYear);
 router.post(
   "/average-processing-time",
   verifySuperClient,
-  getAverageProcessingTime
+  getAverageProcessingTime,
 );
 router.post("/average-order-value", verifySuperClient, getOrderValueBreakdown);
-router.get("/daily-receipt", verifyToken, getUserArchivedOrders);
-router.post("/history", verifyToken, getAllUserArchivedOrders);
+router.get("/daily-receipt", verifyClientOrSuperClient, getUserArchivedOrders);
+router.post("/history", verifyClientOrSuperClient, getAllUserArchivedOrders);
 
-router.post("/close-daily", verifyToken, closeUserOrders);
+router.post("/close-daily", verifyClientOrSuperClient, closeUserOrders);
 
 router.get(
   "/revenue-by-product-by-day",
   verifySuperClient,
-  getRevenueByProductForCurrentWeek
+  getRevenueByProductForCurrentWeek,
 );
 router.post(
   "/revenue-by-product-between-dates",
   verifySuperClient,
-  getRevenueByProductBetweenDates
+  getRevenueByProductBetweenDates,
 );
 
 module.exports = router;

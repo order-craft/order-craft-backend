@@ -1,3 +1,4 @@
+const logger = require("../logger");
 const Bill = require("../models/Bill");
 
 // Create a new bill
@@ -42,7 +43,7 @@ const getBillByClient = async (req, res) => {
     console.log(clientId);
     const bill = await Bill.findOne({ client: clientId }).populate(
       "client",
-      "name email"
+      "name email",
     );
     if (!bill) {
       return res
@@ -108,10 +109,20 @@ const deleteBill = async (req, res) => {
 const getTransactionsByClient = async (req, res) => {
   try {
     const { clientId } = req.params;
+    const superClientId = req.superClientId;
+
+    if (String(clientId) !== String(superClientId)) {
+      logger.warn(
+        `[BILL] Blocked access to bill ${clientId} from superClient ${superClientId}`,
+      );
+      return res
+        .status(404)
+        .json({ message: "Bill not found for this client." });
+    }
 
     const bill = await Bill.findOne({ client: clientId }).populate(
       "client",
-      "name email"
+      "name email",
     );
     if (!bill) {
       return res

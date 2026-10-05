@@ -32,47 +32,50 @@ const router = express.Router();
 
 // Routes for table operations
 router.get("/", verifyClientOrSuperClient, getTablesWithUnpaiedOrders); // Get tables with unpaid orders
+// Routes for table operations
+// IMPORTANT: specific routes must come before "/:id" or Express will shadow them
 router.get("/all", verifyToken, getTables); // Get all tables for the authenticated user
+router.get("/guru/revenue-per-table", verifySuperClient, getRevenueByTable);
+router.get(
+  "/dashboard/revenue-per-table",
+  verifySuperClient,
+  getRevenueByTableArchived,
+);
 router.get("/:id", verifyClientOrSuperClient, getTableById); // Get a single table by ID
-router.post("/", verifyClientOrSuperClient, createTable); // Create a new table
-router.put("/:id", verifyClientOrSuperClient, updateTable); // Update an existing table
-router.delete("/:id", verifyClientOrSuperClient, deleteTable); // Delete a table
+router.post("/", verifySuperClient, createTable); // Create a new table
+router.put("/:id", verifySuperClient, updateTable); // Update an existing table
+router.delete("/:id", verifySuperClient, deleteTable); // Delete a table
 
 // Routes for reservation operations
 router.post("/reservations", verifyClientOrSuperClient, createReservation); // Create a new reservation
 router.get(
   "/:tableId/reservations",
   verifyClientOrSuperClient,
-  getReservationsForTable
+  getReservationsForTable,
 ); // Get reservations for a specific table
 router.post(
   "/reservations/all",
   verifyClientOrSuperClient,
-  getTablesWithReservations
+  getTablesWithReservations,
 ); // Get reservations
 router.post("/availability", verifyClientOrSuperClient, checkTableAvailability); // Check table availability for a time range
 router.post("/move-orders", verifyClientOrSuperClient, moveOrdersToTable); // Check table availability for a time range
 router.delete(
   "/:tableId/reservations/:reservationId",
   verifyClientOrSuperClient,
-  deleteReservation
+  deleteReservation,
 ); // Delete a specific reservation
 router.put(
   "/:tableId/reservations/:reservationId",
   verifyClientOrSuperClient,
-  updateReservation
+  updateReservation,
 ); // Update an existing reservation
-router.get("/guru/revenue-per-table", verifySuperClient, getRevenueByTable);
-router.get(
-  "/dashboard/revenue-per-table",
-  verifySuperClient,
-  getRevenueByTableArchived
-);
+
 //plans routes
-router.post("/plans", verifyClientOrSuperClient, createPlan);
+router.post("/plans", verifySuperClient, createPlan);
 router.get("/get/plans", verifyClientOrSuperClient, getPlans);
 router.get("/plans/:id", verifyClientOrSuperClient, getPlan);
-router.put("/plans/:id", verifyClientOrSuperClient, updatePlan);
-router.delete("/plans/:id", verifyClientOrSuperClient, deletePlan);
+router.put("/plans/:id", verifySuperClient, updatePlan);
+router.delete("/plans/:id", verifySuperClient, deletePlan);
 
 module.exports = router;
