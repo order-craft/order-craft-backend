@@ -439,7 +439,12 @@ const tipOrder = async (req, res) => {
 const confirmSelectedPayments = async (req, res) => {
   const { orderIds, paymentMethod } = req.body;
   const superId = req.userId;
+  const superClientId = req.superClientId;
 
+  logger.info(
+    `[CONFIRM_ALL] ENTER req.userId=${req.userId} req.superClientId=${req.superClientId} ` +
+      `role=${req.role} orderIds=${JSON.stringify(orderIds)} paymentMethod=${paymentMethod}`,
+  );
   try {
     // Basic validation
     if (!Array.isArray(orderIds) || orderIds.length === 0) {
@@ -462,7 +467,12 @@ const confirmSelectedPayments = async (req, res) => {
     const session = await mongoose.startSession();
     let warnings = [];
     let insufficientMaterials = [];
+    let deficits = [];
 
+    logger.info(
+      `[CONFIRM_ALL] VALIDATION passed rawCount=${orderIds?.length} validCount=${validOrderIds?.length} ` +
+        `paymentMethod=${paymentMethod}`,
+    );
     try {
       const transactionOptions = {
         readPreference: "primary",
@@ -475,11 +485,14 @@ const confirmSelectedPayments = async (req, res) => {
         const orders = await Order.find({
           _id: { $in: validOrderIds },
           payed: false,
-          superId,
+          superClientId,
         })
           .session(session)
           .populate("superClientId");
-
+        logger.info(
+          `[CONFIRM_ALL] QUERY_RESULT validIds=${validOrderIds.length} found=${orders.length} ` +
+            `superClientId=${superClientId}`,
+        );
         if (!orders.length) {
           throw Object.assign(new Error("No unpaid orders found"), {
             statusCode: 404,
@@ -525,18 +538,33 @@ const confirmSelectedPayments = async (req, res) => {
           order.payed = true;
           order.user = superId;
 
-          // Decrement inventory and collect warnings/insufficient materials
-          if (order.status != "completed") {
+          // Decrement inventory (exactly once per order)
+          if (!order.inventoryConsumed) {
             const decrementResult = await decrementForOrder(order, session);
+
+            if (!decrementResult.skipped) {
+              order.inventoryConsumed = true;
+              if (
+                Array.isArray(decrementResult.deficits) &&
+                decrementResult.deficits.length > 0
+              ) {
+                order.inventoryDeficits.push(...decrementResult.deficits);
+              }
+            }
+
             warnings = [...warnings, ...(decrementResult.warnings || [])];
             insufficientMaterials = [
               ...insufficientMaterials,
               ...(decrementResult.insufficientMaterials || []),
             ];
+            deficits = [...deficits, ...(decrementResult.deficits || [])];
           }
 
           // Save the updated order
           await order.save({ session });
+          logger.info(
+            `[CONFIRM_ALL] ORDER_PAID orderId=${order._id} totalPrice=${order.totalPrice} status=${order.status}`,
+          );
           console.log(`Order ${order._id} marked as paid and archived.`);
         }
 
@@ -572,8 +600,12 @@ const confirmSelectedPayments = async (req, res) => {
       if (insufficientMaterials.length > 0) {
         response.insufficientMaterials = insufficientMaterials;
       }
+      if (deficits.length > 0) response.deficits = deficits;
       return res.status(200).json(response);
     } catch (err) {
+      logger.error(
+        `[CONFIRM_ALL] ERROR name=${err.name} message=${err.message} stack=${err.stack}`,
+      );
       if (err.statusCode) {
         return res.status(err.statusCode).json({ message: err.message });
       }
@@ -614,7 +646,7 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
     let updatedOrder;
     let warnings = [];
     let insufficientMaterials = [];
-
+    let deficits = [];
     try {
       const transactionOptions = {
         readPreference: "primary",
@@ -674,11 +706,23 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
         order.status = "archived";
         order.user = superId;
 
-        // 8. Decrement inventory and collect warnings/insufficient materials
-        if (order.status != "completed") {
+        // 8. Decrement inventory (exactly once per order)
+        if (!order.inventoryConsumed) {
           const decrementResult = await decrementForOrder(order, session);
+
+          if (!decrementResult.skipped) {
+            order.inventoryConsumed = true;
+            if (
+              Array.isArray(decrementResult.deficits) &&
+              decrementResult.deficits.length > 0
+            ) {
+              order.inventoryDeficits.push(...decrementResult.deficits);
+            }
+          }
+
           warnings = decrementResult.warnings || [];
           insufficientMaterials = decrementResult.insufficientMaterials || [];
+          deficits = decrementResult.deficits || [];
         }
 
         // 9. Persist all changes to the order
@@ -744,7 +788,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
     let updatedOrder;
     let warnings = [];
     let insufficientMaterials = [];
-
+    let deficits = [];
     try {
       const transactionOptions = {
         readPreference: "primary",
@@ -838,6 +882,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
           order.payed = true;
           order.status = "archived";
           order.user = superID;
+
           // Update the super client's bill (4% commission on totalPrice)
           if (order.superClientId) {
             const bill = await Bill.findOne({
@@ -852,6 +897,25 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
                 `No bill found for superClient ${order.superClientId._id}`,
               );
             }
+          }
+
+          // Decrement inventory (exactly once per order)
+          if (!order.inventoryConsumed) {
+            const decrementResult = await decrementForOrder(order, session);
+
+            if (!decrementResult.skipped) {
+              order.inventoryConsumed = true;
+              if (
+                Array.isArray(decrementResult.deficits) &&
+                decrementResult.deficits.length > 0
+              ) {
+                order.inventoryDeficits.push(...decrementResult.deficits);
+              }
+            }
+
+            warnings = decrementResult.warnings || [];
+            insufficientMaterials = decrementResult.insufficientMaterials || [];
+            deficits = decrementResult.deficits || [];
           }
         }
 
@@ -878,6 +942,9 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
       if (insufficientMaterials.length > 0) {
         response.insufficientMaterials = insufficientMaterials;
       }
+      if (deficits.length > 0) {
+        response.deficits = deficits;
+      }
 
       return res.status(200).json(response);
     } catch (err) {
@@ -899,7 +966,10 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 const confirmSelectedProductsPayments = async (req, res) => {
   const { orderId, productIds, paymentMethod } = req.body;
   const superId = req.userId;
-
+  logger.info(
+    `[CONFIRM_PRODUCTS] ENTER req.userId=${req.userId} req.superClientId=${req.superClientId} ` +
+      `role=${req.role} orderId=${orderId} productIdsLen=${productIds?.length} paymentMethod=${paymentMethod}`,
+  );
   try {
     // Validate inputs
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
@@ -947,6 +1017,14 @@ const confirmSelectedProductsPayments = async (req, res) => {
             statusCode: 404,
           });
         }
+        // ─── [DEBUG][CONFIRM_PRODUCTS] query result ──────────
+        logger.info(
+          `[CONFIRM_PRODUCTS] QUERY_RESULT found=${!!order} ` +
+            (order
+              ? `order.superClientId=${order.superClientId} status=${order.status} payed=${order.payed}`
+              : ""),
+        );
+        // ────────────────────────────────────────────────────
 
         // Update product payments
         order.products = order.products.map((item) => {
@@ -991,11 +1069,23 @@ const confirmSelectedProductsPayments = async (req, res) => {
             }
           }
           // Decrement inventory
-          if (order.status != "completed") {
-            // this condition is set in order to prevent changin the status after the order is paid
+          // Decrement inventory (exactly once per order)
+          if (!order.inventoryConsumed) {
             const decrementResult = await decrementForOrder(order, session);
+
+            if (!decrementResult.skipped) {
+              order.inventoryConsumed = true;
+              if (
+                Array.isArray(decrementResult.deficits) &&
+                decrementResult.deficits.length > 0
+              ) {
+                order.inventoryDeficits.push(...decrementResult.deficits);
+              }
+            }
+
             warnings = decrementResult.warnings || [];
             insufficientMaterials = decrementResult.insufficientMaterials || [];
+            deficits = decrementResult.deficits || [];
           }
         }
 
@@ -1119,7 +1209,7 @@ const updateOrderStatus = async (req, res) => {
   let updatedOrder;
   let warnings = [];
   let insufficientMaterials = [];
-
+  let deficits = [];
   try {
     const transactionOptions = {
       readPreference: "primary",
@@ -1130,10 +1220,7 @@ const updateOrderStatus = async (req, res) => {
     await session.withTransaction(async () => {
       // Load order inside transaction
       // Inside your transaction, modify the findById line:
-      const order = await Order.findOne({
-        _id: orderId,
-        superClientId,
-      })
+      const order = await Order.findById(orderId)
         .populate("table")
         .populate("products.product")
         .session(session);
@@ -1149,16 +1236,47 @@ const updateOrderStatus = async (req, res) => {
       // Update status
       order.status = newStatus;
       order.statusTimestamps[newStatus] = new Date();
-      await order.save({ session });
 
-      // Store the updated order in outer scope
-      updatedOrder = order;
-
-      // On completed, decrement stock
-      if (newStatus === "completed") {
+      // Decrement inventory BEFORE saving (single save below)
+      if (newStatus === "completed" && !order.inventoryConsumed) {
         const decrementResult = await decrementForOrder(order, session);
+
+        if (!decrementResult.skipped) {
+          order.inventoryConsumed = true;
+          if (
+            Array.isArray(decrementResult.deficits) &&
+            decrementResult.deficits.length > 0
+          ) {
+            order.inventoryDeficits.push(...decrementResult.deficits);
+          }
+        }
+
         warnings = decrementResult.warnings || [];
         insufficientMaterials = decrementResult.insufficientMaterials || [];
+        deficits = decrementResult.deficits || [];
+      }
+
+      // Single save — persists status + inventoryConsumed + deficits
+      await order.save({ session });
+      updatedOrder = order;
+
+      // On completed, decrement stock — only if not already consumed
+      if (newStatus === "completed" && !order.inventoryConsumed) {
+        const decrementResult = await decrementForOrder(order, session);
+
+        if (!decrementResult.skipped) {
+          order.inventoryConsumed = true;
+          if (
+            Array.isArray(decrementResult.deficits) &&
+            decrementResult.deficits.length > 0
+          ) {
+            order.inventoryDeficits.push(...decrementResult.deficits);
+          }
+        }
+
+        warnings = decrementResult.warnings || [];
+        insufficientMaterials = decrementResult.insufficientMaterials || [];
+        deficits = decrementResult.deficits || [];
       }
 
       // Don't return anything - just let the transaction complete
@@ -1196,6 +1314,9 @@ const updateOrderStatus = async (req, res) => {
       insufficientMaterials.length > 0
     ) {
       response.insufficientMaterials = insufficientMaterials;
+    }
+    if (Array.isArray(deficits) && deficits.length > 0) {
+      response.deficits = deficits;
     }
 
     return res.json(response);

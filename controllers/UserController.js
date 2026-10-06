@@ -831,71 +831,150 @@ const loginTable = async (req, res) => {
 
 //QR login
 
-const qrLogin = async (req, res) => {
-  const { token } = req.body; // Get the token from the request body
+// Haversine distance in meters between two points given as
+// { lat, lon } objects (accepts string or number for either field).
+const haversineDistanceMeters = (a, b) => {
+  const lat1 = Number(a?.lat);
+  const lon1 = Number(a?.lon ?? a?.long);
+  const lat2 = Number(b?.lat);
+  const lon2 = Number(b?.lon ?? b?.long);
 
-  // console.log(req);
+  if (![lat1, lon1, lat2, lon2].every((n) => Number.isFinite(n))) {
+    return null; // cannot compute
+  }
+
+  const R = 6371000; // Earth radius in meters
+  const toRad = (deg) => (deg * Math.PI) / 180;
+
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+
+  const x =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  return R * c;
+};
+
+const qrLogin = async (req, res) => {
+  const { token, lat, lon } = req.body;
+
+  // ─── [DEBUG] entry ────────────────────────────────────────
+  logger.info(
+    `[QRLOGIN] ENTER ip=${req.ip} lat=${lat} lon=${lon} tokenLen=${token?.length || 0}`,
+  );
+  // ─────────────────────────────────────────────────────────
 
   try {
-    // Verify the token and decode the payload
-    const decodedToken = jwt.verify(token, process.env.JWT_SECRET_KEY);
+    if (!token) {
+      logger.warn("[QRLOGIN] Missing token in body");
+      return res.status(400).json({ msg: "QR token is required" });
+    }
 
-    // Extract the table number and superClient from the decoded token payload
+    // Client must supply a location; server enforces the check.
+    if (lat == null || lon == null) {
+      logger.warn("[QRLOGIN] Missing lat/lon in body");
+      return res
+        .status(400)
+        .json({ msg: "Location (lat, lon) is required to log in" });
+    }
+
+    const decodedToken = jwt.verify(token, process.env.JWT_SECRET_KEY);
     const { number: tableNumber, superClient } = decodedToken;
 
-    // Find the table based on the table number and superClient
+    logger.info(
+      `[QRLOGIN] DECODED tableNumber=${tableNumber} superClient=${superClient}`,
+    );
+
     const tableData = await Table.findOne({
       number: tableNumber,
       superClient: superClient,
     });
-
     if (!tableData) {
+      logger.warn(
+        `[QRLOGIN] Table not found tableNumber=${tableNumber} superClient=${superClient}`,
+      );
       return res.status(400).json({ msg: "Table not found or not authorized" });
     }
 
-    // Fetch the superClient's details to get the place location
     const superClientData = await User.findById(superClient);
-
     if (!superClientData || superClientData.role !== "superClient") {
+      logger.warn(`[QRLOGIN] SuperClient not found id=${superClient}`);
       return res
         .status(400)
         .json({ msg: "SuperClient not found or not authorized" });
     }
 
-    const { placeName, placeLocation, distance, placeLogo } = superClientData; // Extract placeName and placeLocation
+    const { placeName, placeLocation, distance, placeLogo } = superClientData;
 
-    // Create a session or token for the logged-in user
-    const payload = {
-      user: {
-        id: decodedToken.superClient, // Get the user ID from the token
-        role: "superClient", // Use the role for superClient
-      },
-      table: {
-        id: tableData._id,
-        number: tableData.number,
-      },
+    // ─── Server-side geolocation check ────────────────────────
+    const guestLocation = { lat, lon };
+    const cafeLocation = {
+      lat: placeLocation?.lat,
+      lon: placeLocation?.long ?? placeLocation?.lon,
     };
 
-    // Sign and send the new token along with the place location
+    const meters = haversineDistanceMeters(guestLocation, cafeLocation);
+
+    logger.info(
+      `[QRLOGIN] DISTANCE_CHECK guestLat=${lat} guestLon=${lon} ` +
+        `cafeLat=${cafeLocation.lat} cafeLon=${cafeLocation.lon} ` +
+        `meters=${meters} allowed=${distance}`,
+    );
+
+    if (meters == null) {
+      logger.warn(
+        "[QRLOGIN] DISTANCE_UNCOMPUTABLE — cafe coordinates malformed",
+      );
+      return res
+        .status(400)
+        .json({ msg: "Café location is not configured properly" });
+    }
+
+    const allowed = Number(distance) || 0;
+    if (meters > allowed) {
+      logger.warn(
+        `[QRLOGIN] REJECTED_TOO_FAR meters=${meters.toFixed(2)} allowed=${allowed}`,
+      );
+      return res.status(403).json({
+        msg: "You are too far from the café to place an order",
+        distanceMeters: Math.round(meters),
+        allowedMeters: allowed,
+      });
+    }
+    // ─────────────────────────────────────────────────────────
+
+    const payload = {
+      user: { id: decodedToken.superClient, role: "superClient" },
+      table: { id: tableData._id, number: tableData.number },
+    };
+
     jwt.sign(
       payload,
       process.env.JWT_SECRET_KEY,
-      { expiresIn: "24h" },
+      { expiresIn: process.env.GUEST_SESSION_EXPIRES_IN || "1h" },
       (err, newToken) => {
         if (err) throw err;
-
+        logger.info(
+          `[QRLOGIN] SUCCESS tableNumber=${tableData.number} superClient=${superClient} distanceOk=${Math.round(meters)}/${allowed}`,
+        );
         res.json({
           token: newToken,
           message: "Logged in successfully",
           tableNumber: tableData.number,
-          placeName, // Include the place name in the response
-          placeLocation, // Include the place location in the response
+          placeName,
+          placeLocation,
           distance,
           placeLogo,
         });
       },
     );
   } catch (err) {
+    logger.error(`[QRLOGIN] ERROR message=${err.message}`);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };

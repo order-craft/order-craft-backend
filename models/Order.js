@@ -1,22 +1,21 @@
 const mongoose = require("mongoose");
-const { decrementForOrder } = require("../Helpers/functions");
 const Schema = mongoose.Schema;
 
 const orderSchema = new Schema({
   orderType: {
     type: String,
-    enum: ['dine-in', 'to-go', 'delivery'],
-    default: 'dine-in'
+    enum: ["dine-in", "to-go", "delivery"],
+    default: "dine-in",
   },
   orderNumber: {
     type: Number,
     required: function () {
-      return (this.orderType === "to-go" || this.orderType === "delivery");
-    }
+      return this.orderType === "to-go" || this.orderType === "delivery";
+    },
   },
   orderDate: {
     type: Date,
-    default: () => new Date()
+    default: () => new Date(),
   },
   products: {
     type: [
@@ -51,16 +50,16 @@ const orderSchema = new Schema({
           ref: "PaymentMethod",
           required: false, // Optional: not all products must have a paymentMethod initially
         },
-      }
+      },
     ],
-    required: [true, "An order must have at least one product"],    // ensures the field is present
+    required: [true, "An order must have at least one product"], // ensures the field is present
     validate: {
       validator: function (arr) {
         // array must be non-null and have at least one element
         return Array.isArray(arr) && arr.length > 0;
       },
-      message: "An order must contain at least one product."
-    }
+      message: "An order must contain at least one product.",
+    },
     // alternatively, you can use `minlength: 1` in place of `validate`:
     // minlength: [1, "An order must contain at least one product"]
   },
@@ -68,7 +67,7 @@ const orderSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: "Table",
     required: function () {
-      return (this.orderType === "dine-in");
+      return this.orderType === "dine-in";
     },
   },
   status: {
@@ -119,6 +118,25 @@ const orderSchema = new Schema({
     type: Number,
     required: false,
   },
+  inventoryConsumed: {
+    type: Boolean,
+    default: false,
+    index: true,
+  },
+  inventoryDeficits: [
+    {
+      rawMaterialId: {
+        type: Schema.Types.ObjectId,
+        ref: "RawMaterial",
+      },
+      rawMaterialName: { type: String },
+      unit: { type: String },
+      needed: { type: Number },
+      available: { type: Number },
+      deficit: { type: Number },
+      consumedAt: { type: Date, default: Date.now },
+    },
+  ],
   paymentMethod: {
     type: Schema.Types.ObjectId,
     ref: "PaymentMethod",
@@ -182,14 +200,7 @@ orderSchema.pre("save", async function (next) {
   next();
 });
 
-orderSchema.post("findOneAndUpdate", async function (doc) {
-  // `this` is the query; `doc` is the updated document
-  const prev = await this.model.findById(doc._id).lean();
-  if (prev.status !== "completed" && doc.status === "completed") {
-    // emit an event, or directly call the same stock‑decrement routine:
-    await decrementForOrder(doc);
-  }
-});
+
 
 const Order = mongoose.model("Order", orderSchema);
 module.exports = Order;
