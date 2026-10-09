@@ -21,6 +21,9 @@ const {
   getRevenueByWaiterAndPeriod,
   getDailyRevenuePerWaiter,
   getAllUserArchivedOrders,
+  getProfitSummary,
+  getProductMargins,
+  getProfitByPeriod,
 } = require("../controllers/DashboardingController");
 const verifySuperClient = require("../middleWares/VerifySuperClient");
 const verifyClientOrSuperClient = require("../middleWares/verifyClientOrSuperClient");
@@ -95,5 +98,9 @@ router.post(
   verifySuperClient,
   getRevenueByProductBetweenDates,
 );
+// ── Profit endpoints ────────────────────────────────────────
+router.post("/profit-summary", verifySuperClient, getProfitSummary);
+router.get("/product-margins", verifySuperClient, getProductMargins);
+router.post("/profit-by-period", verifySuperClient, getProfitByPeriod);
 
 module.exports = router;

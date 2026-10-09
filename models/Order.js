@@ -41,14 +41,33 @@ const orderSchema = new Schema({
           default: 1,
         },
         payedQuantity: {
-          // New field to track the number of units paid
           type: Number,
           default: 0,
         },
         paymentMethod: {
           type: Schema.Types.ObjectId,
           ref: "PaymentMethod",
-          required: false, // Optional: not all products must have a paymentMethod initially
+          required: false,
+        },
+        unitCost: {
+          type: Number,
+          required: false,
+          default: null,
+        },
+        costBreakdown: [
+          {
+            rawMaterialId: { type: Schema.Types.ObjectId, ref: "RawMaterial" },
+            rawMaterialName: { type: String },
+            unit: { type: String },
+            quantityPerUnit: { type: Number },
+            costPerUnit: { type: Number },
+            lineCost: { type: Number },
+          },
+        ],
+        costSnapshotAt: {
+          type: Date,
+          required: false,
+          default: null,
         },
       },
     ],
@@ -88,9 +107,24 @@ const orderSchema = new Schema({
   totalPrice: {
     type: Number,
   },
+  totalCost: {
+    type: Number,
+    required: false,
+    default: null,
+  },
+  totalProfit: {
+    type: Number,
+    required: false,
+    default: null,
+  },
+  costSnapshotAt: {
+    type: Date,
+    required: false,
+    default: null,
+  },
   timestamp: {
     type: Date,
-    default: Date.now, // Remove the parentheses to make it dynamic
+    default: Date.now,
   },
   rated: {
     type: Boolean,
@@ -199,8 +233,6 @@ orderSchema.pre("save", async function (next) {
   }
   next();
 });
-
-
 
 const Order = mongoose.model("Order", orderSchema);
 module.exports = Order;

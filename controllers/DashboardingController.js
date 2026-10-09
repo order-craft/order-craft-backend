@@ -88,7 +88,7 @@ const getMonthlyRevenue = async (req, res) => {
     const startOfMonth = new Date(
       new Date().getFullYear(),
       new Date().getMonth(),
-      1
+      1,
     );
 
     // Récupérer toutes les commandes archivées du mois en cours
@@ -153,7 +153,7 @@ const getMonthlyRevenue = async (req, res) => {
       ([day, total]) => ({
         _id: { day: parseInt(day) },
         dailyRevenue: total,
-      })
+      }),
     );
 
     res.status(200).json({
@@ -187,17 +187,17 @@ const getMonthlyGrowthRate = async (req, res) => {
     const startOfCurrentMonth = new Date(
       currentDate.getFullYear(),
       currentDate.getMonth(),
-      1
+      1,
     );
     const startOfPreviousMonth = new Date(
       currentDate.getFullYear(),
       currentDate.getMonth() - 1,
-      1
+      1,
     );
     const endOfPreviousMonth = new Date(
       currentDate.getFullYear(),
       currentDate.getMonth(),
-      0
+      0,
     ); // Last day of the previous month
 
     // Fetch orders for the current month and filter by superClientId
@@ -210,7 +210,7 @@ const getMonthlyGrowthRate = async (req, res) => {
     // Calculate current month revenue
     const currentMonthRevenue = currentMonthOrders.reduce(
       (total, order) => total + order.totalPrice,
-      0
+      0,
     );
 
     // Fetch orders for the previous month and filter by superClientId
@@ -223,7 +223,7 @@ const getMonthlyGrowthRate = async (req, res) => {
     // Calculate previous month revenue
     const previousMonthRevenue = previousMonthOrders.reduce(
       (total, order) => total + order.totalPrice,
-      0
+      0,
     );
 
     // Calculate growth rate
@@ -298,7 +298,7 @@ const getWeeklyRevenue = async (req, res) => {
     // Revenue calculation for previous week (simplified)
     const prevWeekRevenue = prevWeekOrders.reduce(
       (total, order) => total + order.totalPrice,
-      0
+      0,
     );
 
     const revenueByPaymentMethod = {};
@@ -359,7 +359,7 @@ const getWeeklyRevenue = async (req, res) => {
       ([day, total]) => ({
         _id: { day: parseInt(day) },
         dailyRevenue: total,
-      })
+      }),
     );
 
     const growthRate =
@@ -538,7 +538,7 @@ const getRevenueByClient = async (req, res) => {
           ([yearMonth, total]) => ({
             month: yearMonth,
             totalRevenue: total,
-          })
+          }),
         );
 
         return {
@@ -546,7 +546,7 @@ const getRevenueByClient = async (req, res) => {
           clientName: name, // Include client name
           monthlyRevenue: monthlyData,
         };
-      }
+      },
     );
 
     res.status(200).json(formattedRevenue);
@@ -611,7 +611,7 @@ const getRevenueByWaiterAndPeriod = async (req, res) => {
         clientId,
         clientName: name,
         totalRevenue,
-      })
+      }),
     );
 
     res.status(200).json(formattedRevenue);
@@ -703,7 +703,7 @@ const getUserArchivedOrders = async (req, res) => {
     // Calculate the overall total revenue for all orders combined
     const totalRevenue = orderData.reduce(
       (acc, order) => acc + order.totalPrice,
-      0
+      0,
     );
 
     // Format the response data
@@ -781,7 +781,7 @@ const getAllUserArchivedOrders = async (req, res) => {
 
     const totalRevenue = orderData.reduce(
       (acc, order) => acc + (order.totalPrice || 0),
-      0
+      0,
     );
 
     res.status(200).json({
@@ -838,7 +838,7 @@ const closeUserOrders = async (req, res) => {
       },
       {
         $set: { isClosed: true }, // Set isClosed to true
-      }
+      },
     );
 
     // Return the modified orders with product details
@@ -890,7 +890,7 @@ const getRevenueByProduct = async (req, res) => {
         _id: productId,
         productName: details.productName,
         totalRevenue: details.totalRevenue,
-      })
+      }),
     );
 
     res.status(200).json(formattedRevenue);
@@ -955,7 +955,7 @@ const getRevenueByProductByMonth = async (req, res) => {
           productName: details.productName,
           totalRevenue: details.totalRevenue,
         })),
-      })
+      }),
     );
 
     res.status(200).json(formattedRevenue);
@@ -1054,7 +1054,7 @@ const getOrdersByMonthForYear = async (req, res) => {
       ([month, orders]) => ({
         _id: { month: parseInt(month) },
         orders: orders,
-      })
+      }),
     );
 
     res.status(200).json(formattedOrders);
@@ -1111,7 +1111,7 @@ const getRevenueByProductBetweenDates = async (req, res) => {
         _id: productId,
         productName: details.productName,
         totalRevenue: details.totalRevenue,
-      })
+      }),
     );
 
     res.status(200).json(formattedRevenue);
@@ -1307,7 +1307,7 @@ const getRevenueByProductForCurrentWeek = async (req, res) => {
           productName: details.productName,
           totalRevenue: details.totalRevenue,
         })),
-      })
+      }),
     );
 
     res.status(200).json(formattedRevenue);
@@ -1354,7 +1354,7 @@ const getAverageProcessingTime = async (req, res) => {
         } else {
           skippedOrders++;
           console.warn(
-            `Skipped order ${order._id}: Invalid pending→preparing duration (${duration}ms)`
+            `Skipped order ${order._id}: Invalid pending→preparing duration (${duration}ms)`,
           );
         }
       }
@@ -1367,7 +1367,7 @@ const getAverageProcessingTime = async (req, res) => {
         } else {
           skippedOrders++;
           console.warn(
-            `Skipped order ${order._id}: Invalid preparing→completed duration (${duration}ms)`
+            `Skipped order ${order._id}: Invalid preparing→completed duration (${duration}ms)`,
           );
         }
       }
@@ -1388,7 +1388,7 @@ const getAverageProcessingTime = async (req, res) => {
 
       const totalDuration = durations.reduce(
         (sum, duration) => sum + duration,
-        0
+        0,
       );
       const avg = totalDuration / durations.length;
       const min = Math.min(...durations);
@@ -1405,11 +1405,11 @@ const getAverageProcessingTime = async (req, res) => {
 
     const pendingToPreparingStats = calculateStats(
       pendingToPreparingDurations,
-      "pending→preparing"
+      "pending→preparing",
     );
     const preparingToCompletedStats = calculateStats(
       preparingToCompletedDurations,
-      "preparing→completed"
+      "preparing→completed",
     );
 
     res.status(200).json({
@@ -1494,7 +1494,7 @@ const getOrderValueBreakdown = async (req, res) => {
 
     // Calculate average order value
     const averageOrderValue = parseFloat(
-      (totalOrderValue / orders.length).toFixed(2)
+      (totalOrderValue / orders.length).toFixed(2),
     );
 
     // Return results
@@ -1510,7 +1510,319 @@ const getOrderValueBreakdown = async (req, res) => {
     });
   }
 };
+/**
+ * Profit summary for a date range.
+ * Body: { startDate?, endDate? }
+ * Defaults: last 30 days.
+ *
+ * Returns:
+ *   {
+ *     range: { startDate, endDate },
+ *     orderCount,
+ *     revenue,          // sum of totalPrice
+ *     cost,             // sum of totalCost (only orders that have it)
+ *     profit,           // sum of totalProfit
+ *     marginPercent,
+ *     ordersWithoutSnapshot,   // count — cost is unreliable for these
+ *     excludedOrderIds,        // ids of orders missing the snapshot
+ *   }
+ */
+const getProfitSummary = async (req, res) => {
+  const superClientId = req.superClientId;
+  const { startDate, endDate } = req.body || {};
 
+  const defaultEndDate = new Date();
+  defaultEndDate.setHours(23, 59, 59, 999);
+
+  const defaultStartDate = new Date();
+  defaultStartDate.setDate(defaultStartDate.getDate() - 30);
+  defaultStartDate.setHours(0, 0, 0, 0);
+
+  const start = startDate ? new Date(startDate) : defaultStartDate;
+  const end = endDate ? new Date(endDate) : defaultEndDate;
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    return res.status(400).json({ message: "Invalid date format" });
+  }
+
+  try {
+    const orders = await Order.find({
+      status: "archived",
+      superClientId,
+      timestamp: { $gte: start, $lte: end },
+    }).lean();
+
+    if (orders.length === 0) {
+      return res.status(200).json({
+        range: { startDate: start, endDate: end },
+        orderCount: 0,
+        revenue: 0,
+        cost: 0,
+        profit: 0,
+        marginPercent: 0,
+        ordersWithoutSnapshot: 0,
+        excludedOrderIds: [],
+      });
+    }
+
+    let revenue = 0;
+    let cost = 0;
+    let profit = 0;
+    const excludedOrderIds = [];
+
+    for (const o of orders) {
+      revenue += Number(o.totalPrice) || 0;
+
+      if (o.totalCost == null || o.costSnapshotAt == null) {
+        excludedOrderIds.push(o._id);
+      } else {
+        cost += Number(o.totalCost) || 0;
+        profit += Number(o.totalProfit) || 0;
+      }
+    }
+
+    const marginPercent = revenue > 0 ? (profit / revenue) * 100 : 0;
+
+    res.status(200).json({
+      range: { startDate: start, endDate: end },
+      orderCount: orders.length,
+      revenue: parseFloat(revenue.toFixed(4)),
+      cost: parseFloat(cost.toFixed(4)),
+      profit: parseFloat(profit.toFixed(4)),
+      marginPercent: parseFloat(marginPercent.toFixed(2)),
+      ordersWithoutSnapshot: excludedOrderIds.length,
+      excludedOrderIds,
+    });
+  } catch (error) {
+    console.error("Error calculating profit summary:", error);
+    res
+      .status(500)
+      .json({
+        message: "Failed to calculate profit summary",
+        error: error.message,
+      });
+  }
+};
+
+/**
+ * Per-product margins.
+ * Uses stored `costBreakdown` from each archived order line — historical.
+ * Products without a recipe at order time will have `unitCost: null`
+ * and are counted but not priced.
+ *
+ * Returns array of:
+ *   {
+ *     productId, productName,
+ *     unitsSold,
+ *     avgSellPrice,          // weighted: totalRevenue / unitsSold
+ *     avgUnitCost,           // weighted: totalCost / unitsSoldWithRecipe
+ *     revenue, cost, profit,
+ *     marginPercent,
+ *     unitsWithoutRecipe,    // how many units had no recipe
+ *   }
+ */
+const getProductMargins = async (req, res) => {
+  const superClientId = req.superClientId;
+
+  try {
+    const orders = await Order.find({
+      status: "archived",
+      superClientId,
+    }).lean();
+
+    const map = new Map();
+
+    for (const order of orders) {
+      for (const line of order.products || []) {
+        const productId = line.productDetails?._id ?? line.product;
+        if (!productId) continue;
+
+        const key = String(productId);
+        const qty = Number(line.quantity) || 0;
+        const unitPrice = Number(line.productDetails?.price) || 0;
+
+        // Apply discount: if line carries it, else look at breakdown presence.
+        // We don't have discountPercentage on the order line, so use
+        // productDetails.price as-is (that's what was charged).
+        const lineRevenue = unitPrice * qty;
+
+        let entry = map.get(key);
+        if (!entry) {
+          entry = {
+            productId,
+            productName: line.productDetails?.name || "Unknown",
+            unitsSold: 0,
+            unitsWithRecipe: 0,
+            revenue: 0,
+            cost: 0,
+          };
+          map.set(key, entry);
+        }
+
+        entry.unitsSold += qty;
+        entry.revenue += lineRevenue;
+
+        if (line.unitCost != null) {
+          entry.unitsWithRecipe += qty;
+          entry.cost += Number(line.unitCost) * qty;
+        }
+      }
+    }
+
+    const result = Array.from(map.values()).map((e) => {
+      const profit = e.revenue - e.cost;
+      const marginPercent = e.revenue > 0 ? (profit / e.revenue) * 100 : 0;
+      const avgSellPrice = e.unitsSold > 0 ? e.revenue / e.unitsSold : 0;
+      const avgUnitCost =
+        e.unitsWithRecipe > 0 ? e.cost / e.unitsWithRecipe : null;
+
+      return {
+        productId: e.productId,
+        productName: e.productName,
+        unitsSold: e.unitsSold,
+        unitsWithoutRecipe: e.unitsSold - e.unitsWithRecipe,
+        avgSellPrice: parseFloat(avgSellPrice.toFixed(4)),
+        avgUnitCost:
+          avgUnitCost != null ? parseFloat(avgUnitCost.toFixed(4)) : null,
+        revenue: parseFloat(e.revenue.toFixed(4)),
+        cost: parseFloat(e.cost.toFixed(4)),
+        profit: parseFloat(profit.toFixed(4)),
+        marginPercent: parseFloat(marginPercent.toFixed(2)),
+      };
+    });
+
+    // Sort by profit descending
+    result.sort((a, b) => b.profit - a.profit);
+
+    res.status(200).json(result);
+  } catch (error) {
+    console.error("Error calculating product margins:", error);
+    res
+      .status(500)
+      .json({
+        message: "Failed to calculate product margins",
+        error: error.message,
+      });
+  }
+};
+
+/**
+ * Daily profit for a date range.
+ * Body: { startDate?, endDate? }
+ * Defaults: last 14 days.
+ *
+ * Returns:
+ *   {
+ *     range: { startDate, endDate },
+ *     daily: [{ date: "YYYY-MM-DD", revenue, cost, profit, marginPercent, orderCount }],
+ *     totals: { revenue, cost, profit, marginPercent, orderCount },
+ *     ordersWithoutSnapshot,
+ *   }
+ */
+const getProfitByPeriod = async (req, res) => {
+  const superClientId = req.superClientId;
+  const { startDate, endDate } = req.body || {};
+
+  const defaultEndDate = new Date();
+  defaultEndDate.setHours(23, 59, 59, 999);
+
+  const defaultStartDate = new Date();
+  defaultStartDate.setDate(defaultStartDate.getDate() - 14);
+  defaultStartDate.setHours(0, 0, 0, 0);
+
+  const start = startDate ? new Date(startDate) : defaultStartDate;
+  const end = endDate ? new Date(endDate) : defaultEndDate;
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    return res.status(400).json({ message: "Invalid date format" });
+  }
+
+  try {
+    const orders = await Order.find({
+      status: "archived",
+      superClientId,
+      timestamp: { $gte: start, $lte: end },
+    }).lean();
+
+    const byDay = new Map();
+    let totalRevenue = 0;
+    let totalCost = 0;
+    let totalProfit = 0;
+    let orderCount = 0;
+    let ordersWithoutSnapshot = 0;
+
+    for (const o of orders) {
+      const d = new Date(o.timestamp);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+      if (!byDay.has(key)) {
+        byDay.set(key, {
+          date: key,
+          revenue: 0,
+          cost: 0,
+          profit: 0,
+          orderCount: 0,
+        });
+      }
+
+      const bucket = byDay.get(key);
+      const rev = Number(o.totalPrice) || 0;
+      bucket.revenue += rev;
+      bucket.orderCount += 1;
+      totalRevenue += rev;
+      orderCount += 1;
+
+      if (o.totalCost == null || o.costSnapshotAt == null) {
+        ordersWithoutSnapshot += 1;
+      } else {
+        const c = Number(o.totalCost) || 0;
+        const p = Number(o.totalProfit) || 0;
+        bucket.cost += c;
+        bucket.profit += p;
+        totalCost += c;
+        totalProfit += p;
+      }
+    }
+
+    const daily = Array.from(byDay.values())
+      .map((b) => ({
+        date: b.date,
+        revenue: parseFloat(b.revenue.toFixed(4)),
+        cost: parseFloat(b.cost.toFixed(4)),
+        profit: parseFloat(b.profit.toFixed(4)),
+        marginPercent:
+          b.revenue > 0
+            ? parseFloat(((b.profit / b.revenue) * 100).toFixed(2))
+            : 0,
+        orderCount: b.orderCount,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const marginPercent =
+      totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0;
+
+    res.status(200).json({
+      range: { startDate: start, endDate: end },
+      daily,
+      totals: {
+        revenue: parseFloat(totalRevenue.toFixed(4)),
+        cost: parseFloat(totalCost.toFixed(4)),
+        profit: parseFloat(totalProfit.toFixed(4)),
+        marginPercent: parseFloat(marginPercent.toFixed(2)),
+        orderCount,
+      },
+      ordersWithoutSnapshot,
+    });
+  } catch (error) {
+    console.error("Error calculating profit by period:", error);
+    res
+      .status(500)
+      .json({
+        message: "Failed to calculate profit by period",
+        error: error.message,
+      });
+  }
+};
 module.exports = {
   getDailyRevenue,
   getMonthlyRevenue,
@@ -1534,4 +1846,8 @@ module.exports = {
   getDailyRevenuePerWaiter,
   //history
   getAllUserArchivedOrders,
+  //profit
+  getProfitSummary,
+  getProductMargins,
+  getProfitByPeriod,
 };

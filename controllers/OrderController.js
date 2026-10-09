@@ -6,6 +6,7 @@ const { Table } = require("../models/Table");
 const logger = require("../logger");
 const { default: mongoose } = require("mongoose");
 const { decrementForOrder } = require("../Helpers/functions");
+const { buildProductCostSnapshot } = require("../Helpers/costHelpers");
 const OrderCounter = require("../models/OrderCounter");
 const { startOfDay, endOfDay } = require("date-fns");
 
@@ -125,13 +126,45 @@ const createOrder = async (req, res) => {
     }
 
     // 5️⃣ Calculate total price
+    // 5️⃣ Calculate total price
     const totalPrice = await calculateTotalPrice(products);
+
+    // 5️⃣b Cost snapshot — freeze costs at order creation time
+    let totalCost = 0;
+    let allSnapshotsPresent = true;
+
+    for (let i = 0; i < products.length; i++) {
+      const p = products[i];
+      const snapshot = await buildProductCostSnapshot(p.product, session);
+
+      p.unitCost = snapshot.unitCost;
+      p.costBreakdown = snapshot.costBreakdown;
+      p.costSnapshotAt = snapshot.costSnapshotAt;
+
+      if (snapshot.unitCost == null) {
+        allSnapshotsPresent = false;
+      } else {
+        totalCost += snapshot.unitCost * (p.quantity || 1);
+      }
+    }
+
+    const finalTotalCost = allSnapshotsPresent
+      ? parseFloat(totalCost.toFixed(4))
+      : null;
+    const finalTotalProfit =
+      finalTotalCost != null
+        ? parseFloat((totalPrice - finalTotalCost).toFixed(4))
+        : null;
+    const finalCostSnapshotAt = allSnapshotsPresent ? new Date() : null;
 
     // 6️⃣ Build & save the Order
     const orderData = {
       products,
       orderType,
       totalPrice,
+      totalCost: finalTotalCost,
+      totalProfit: finalTotalProfit,
+      costSnapshotAt: finalCostSnapshotAt,
       user: userId,
       superClientId,
       comment,
