@@ -1,5 +1,6 @@
 const Order = require("../models/Order");
 const Bill = require("../models/Bill");
+const User = require("../models/User");
 
 const Product = require("../models/Product");
 const { Table } = require("../models/Table");
@@ -125,7 +126,11 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // 5️⃣ Calculate total price
+    // Read tenant config once
+    const tenant = await User.findById(superClientId)
+      .select("statusFlowEnabled")
+      .session(session);
+    const flowEnabled = tenant?.statusFlowEnabled !== false;
     // 5️⃣ Calculate total price
     const totalPrice = await calculateTotalPrice(products);
 
@@ -168,8 +173,10 @@ const createOrder = async (req, res) => {
       user: userId,
       superClientId,
       comment,
-      status: "pending",
-      statusTimestamps: { pending: new Date() },
+      status: flowEnabled ? "pending" : "completed",
+      statusTimestamps: flowEnabled
+        ? { pending: new Date() }
+        : { completed: new Date() },
       orderDate: new Date(),
     };
     if (table) orderData.table = table._id;
@@ -191,8 +198,23 @@ const createOrder = async (req, res) => {
     await newOrder.populate("products.product");
     await newOrder.populate("table");
 
+    // Re-fetch with full population so the client always gets a consistent shape
+    const populated = await Order.findById(newOrder._id)
+      .populate("products.product")
+      .populate({
+        path: "table",
+        populate: { path: "plan", select: "name _id" },
+      })
+      .lean();
+
+    const payload = {
+      ...populated,
+      statusDurations: newOrder.getStatusDurations(),
+      statusFlowEnabled: flowEnabled,
+    };
+
     // 1️⃣0️⃣ Emit to clients
-    req.io.to(superClientId.toString()).emit("newOrder", newOrder);
+    req.io.to(superClientId.toString()).emit("newOrder", payload);
 
     return res.status(201).json({
       message: "Order created successfully",
@@ -620,6 +642,12 @@ const confirmSelectedPayments = async (req, res) => {
             console.log(`Orders for table ${tableId} archived.`);
           }
         }
+        // Notify connected clients (staff + guests) that these orders changed
+        for (const orderId of validOrderIds) {
+          req.io
+            .to(superClientId.toString())
+            .emit("orderUpdated", { _id: orderId });
+        }
       }, transactionOptions);
 
       // Construct the response
@@ -760,6 +788,11 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
 
         // 9. Persist all changes to the order
         await order.save({ session });
+        req.io.to(String(order.superClientId)).emit("orderUpdated", {
+          _id: order._id,
+          payed: true,
+          status: order.status,
+        });
         console.log(`Order ${orderId} marked as paid and archived.`);
 
         updatedOrder = order;
@@ -954,6 +987,11 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 
         // Save the updated order
         await order.save({ session });
+        req.io.to(String(order.superClientId)).emit("orderUpdated", {
+          _id: order._id,
+          payed: order.payed,
+          status: order.status,
+        });
         updatedOrder = order;
       }, transactionOptions);
 
@@ -1124,8 +1162,15 @@ const confirmSelectedProductsPayments = async (req, res) => {
 
         // Save updated order
         await order.save({ session });
-        updatedOrder = order;
 
+        updatedOrder = order;
+        req.io
+          .to(String(order.superClientId))
+          .emit("orderUpdated", {
+            _id: order._id,
+            payed: order.payed,
+            status: order.status,
+          });
         // Archive table orders if all are paid
         const unpaidOrders = await Order.find({
           table: order.table,
@@ -1213,9 +1258,12 @@ const getOrdersBySuperClientIdFIFO = async (req, res) => {
       statusDurations: order.getStatusDurations(),
     }));
 
+    const tenant =
+      await User.findById(superClientId).select("statusFlowEnabled");
     res.status(200).json({
       orders: ordersWithDurations,
-      plans: uniquePlans, // Include the unique plans in the response
+      plans: uniquePlans,
+      statusFlowEnabled: tenant?.statusFlowEnabled !== false,
     });
   } catch (error) {
     console.error("Error retrieving orders:", error);
@@ -1227,7 +1275,10 @@ const updateOrderStatus = async (req, res) => {
   const { orderId } = req.params;
   const { status: newStatus } = req.body;
   const superClientId = req.superClientId;
-
+  // Enforce the tenant's flow setting on the server side
+  // Read tenant config for this request
+  const tenant = await User.findById(superClientId).select("statusFlowEnabled");
+  const flowEnabled = tenant?.statusFlowEnabled !== false;
   // Basic validation
   if (!mongoose.Types.ObjectId.isValid(orderId)) {
     return res.status(400).json({ error: "Invalid order ID" });
@@ -1264,6 +1315,21 @@ const updateOrderStatus = async (req, res) => {
         throw Object.assign(new Error("Status change not allowed"), {
           statusCode: 400,
         });
+      }
+
+      // When the flow is disabled, only allow the workflow on orders that
+      // were created while the flow was ON (i.e. they're already past pending).
+      // A pending/preparing order created pre-toggle must remain progressable.
+      if (
+        !flowEnabled &&
+        (newStatus === "pending" || newStatus === "preparing") &&
+        order.status !== "pending" &&
+        order.status !== "preparing"
+      ) {
+        throw Object.assign(
+          new Error("Status flow is disabled for this tenant"),
+          { statusCode: 400 },
+        );
       }
 
       // Update status

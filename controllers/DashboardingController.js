@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
+const User = require("../models/User");
 const getDailyRevenue = async (req, res) => {
   const superClientId = req.superClientId;
 
@@ -1322,7 +1323,13 @@ const getRevenueByProductForCurrentWeek = async (req, res) => {
 const getAverageProcessingTime = async (req, res) => {
   const { startDate, endDate } = req.body;
   const superClientId = req.superClientId;
-
+  const tenant = await User.findById(superClientId).select("statusFlowEnabled");
+  if (tenant && tenant.statusFlowEnabled === false) {
+    return res.status(200).json({
+      statusFlowDisabled: true,
+      message: "Status flow is disabled — processing times are not tracked.",
+    });
+  }
   // Set default dates if not provided
   const defaultEndDate = new Date();
   const defaultStartDate = new Date();
@@ -1595,12 +1602,10 @@ const getProfitSummary = async (req, res) => {
     });
   } catch (error) {
     console.error("Error calculating profit summary:", error);
-    res
-      .status(500)
-      .json({
-        message: "Failed to calculate profit summary",
-        error: error.message,
-      });
+    res.status(500).json({
+      message: "Failed to calculate profit summary",
+      error: error.message,
+    });
   }
 };
 
@@ -1697,12 +1702,10 @@ const getProductMargins = async (req, res) => {
     res.status(200).json(result);
   } catch (error) {
     console.error("Error calculating product margins:", error);
-    res
-      .status(500)
-      .json({
-        message: "Failed to calculate product margins",
-        error: error.message,
-      });
+    res.status(500).json({
+      message: "Failed to calculate product margins",
+      error: error.message,
+    });
   }
 };
 
@@ -1815,12 +1818,10 @@ const getProfitByPeriod = async (req, res) => {
     });
   } catch (error) {
     console.error("Error calculating profit by period:", error);
-    res
-      .status(500)
-      .json({
-        message: "Failed to calculate profit by period",
-        error: error.message,
-      });
+    res.status(500).json({
+      message: "Failed to calculate profit by period",
+      error: error.message,
+    });
   }
 };
 module.exports = {

@@ -481,7 +481,7 @@ const getUserById = async (req, res) => {
 
     // Ne sélectionne que les champs non sensibles à renvoyer
     const user = await User.findById(userId).select(
-      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber",
+      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled",
     );
 
     if (!user) {
@@ -577,6 +577,7 @@ const updateBusinessDetails = async (req, res) => {
       long,
       logoPreview,
       picturePreview,
+      statusFlowEnabled,
     } = req.body.placeData;
 
     const userId = req.superClientId;
@@ -611,6 +612,11 @@ const updateBusinessDetails = async (req, res) => {
       };
     }
 
+    // Persist the order-flow flag when supplied
+    if (typeof statusFlowEnabled === "boolean") {
+      updateData.statusFlowEnabled = statusFlowEnabled;
+    }
+
     // Handle image uploads if provided
     if (logoPreview) {
       const uploadedLogo = await cloudinary.uploader.upload(logoPreview, {
@@ -629,8 +635,16 @@ const updateBusinessDetails = async (req, res) => {
       });
       updateData.placePicture = uploadedPicture.secure_url;
     }
+
     console.log(updateData);
     await User.findByIdAndUpdate(userId, updateData);
+
+    // Live-notify every open client tab of this tenant
+    if (typeof statusFlowEnabled === "boolean") {
+      req.io
+        .to(userId.toString())
+        .emit("tenantConfigChanged", { statusFlowEnabled });
+    }
 
     logger.info(`Business details updated for user ${userId}`);
     return res
@@ -970,6 +984,7 @@ const qrLogin = async (req, res) => {
           placeLocation,
           distance,
           placeLogo,
+          statusFlowEnabled: superClientData.statusFlowEnabled !== false,
         });
       },
     );
