@@ -176,6 +176,17 @@ const orderSchema = new Schema({
     ref: "PaymentMethod",
     required: false, // used only when all products are paid using the same method
   },
+  paymentSplits: [
+    {
+      quantity: { type: Number, required: true },
+      paymentMethod: {
+        type: Schema.Types.ObjectId,
+        ref: "PaymentMethod",
+        required: true,
+      },
+      paidAt: { type: Date, default: Date.now },
+    },
+  ],
 });
 
 // the trigger is used to calculate each time the order spent in each status

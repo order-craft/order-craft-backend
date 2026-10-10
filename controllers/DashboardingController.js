@@ -43,19 +43,31 @@ const getDailyRevenue = async (req, res) => {
           (revenueByPaymentMethod[methodName] || 0) + order.totalPrice;
       } else {
         for (const product of order.products) {
-          const methodName =
-            product.paymentMethod?.name ??
-            order.paymentMethod?.name ??
-            "unknown";
-
           const basePrice = product.product?.price ?? 0;
           const discount = product.product?.discountPercentage ?? 0;
-
           const finalUnitPrice = basePrice * (1 - discount / 100);
-          const revenue = finalUnitPrice * product.quantity;
 
-          revenueByPaymentMethod[methodName] =
-            (revenueByPaymentMethod[methodName] || 0) + revenue;
+          const splits =
+            Array.isArray(product.paymentSplits) &&
+            product.paymentSplits.length > 0
+              ? product.paymentSplits
+              : [
+                  {
+                    quantity: product.quantity,
+                    paymentMethod: product.paymentMethod ?? order.paymentMethod,
+                  },
+                ];
+
+          for (const split of splits) {
+            const methodName =
+              split.paymentMethod?.name ??
+              product.paymentMethod?.name ??
+              order.paymentMethod?.name ??
+              "unknown";
+            const revenue = finalUnitPrice * (split.quantity || 0);
+            revenueByPaymentMethod[methodName] =
+              (revenueByPaymentMethod[methodName] || 0) + revenue;
+          }
         }
       }
     }
@@ -112,7 +124,7 @@ const getMonthlyRevenue = async (req, res) => {
       if (!revenueByDay[day]) revenueByDay[day] = 0;
 
       if (order.paymentMethod) {
-        // Cas : toute la commande a une méthode de paiement commune
+        // Whole order paid with a single method (order-level)
         let orderRevenue = 0;
 
         for (const item of order.products) {
@@ -131,21 +143,37 @@ const getMonthlyRevenue = async (req, res) => {
         totalRevenue += orderRevenue;
         revenueByDay[day] += orderRevenue;
       } else {
-        // Cas : les produits ont des méthodes différentes
+        // Products may carry per-unit splits with different methods
         for (const item of order.products) {
           const product = item.product;
           if (!product || !product.price) continue;
 
           const discount = product.discountPercentage || 0;
           const priceAfterDiscount = product.price * (1 - discount / 100);
-          const productRevenue = item.quantity * priceAfterDiscount;
 
-          const method = item.paymentMethod?.name || "Unknown";
-          revenueByPaymentMethod[method] =
-            (revenueByPaymentMethod[method] || 0) + productRevenue;
+          const splits =
+            Array.isArray(item.paymentSplits) && item.paymentSplits.length > 0
+              ? item.paymentSplits
+              : [
+                  {
+                    quantity: item.quantity,
+                    paymentMethod: item.paymentMethod,
+                  },
+                ];
 
-          totalRevenue += productRevenue;
-          revenueByDay[day] += productRevenue;
+          for (const split of splits) {
+            const method =
+              split.paymentMethod?.name ||
+              item.paymentMethod?.name ||
+              "Unknown";
+            const productRevenue = (split.quantity || 0) * priceAfterDiscount;
+
+            revenueByPaymentMethod[method] =
+              (revenueByPaymentMethod[method] || 0) + productRevenue;
+
+            totalRevenue += productRevenue;
+            revenueByDay[day] += productRevenue;
+          }
         }
       }
     }
@@ -336,22 +364,37 @@ const getWeeklyRevenue = async (req, res) => {
         currentWeekRevenue += orderRevenue;
         dailyRevenue[orderDate] += orderRevenue;
       } else {
-        // Products may have different payment methods
+        // Products may carry per-unit splits with different methods
         for (const item of order.products) {
           const product = item.product;
           if (!product || !product.price) continue;
 
           const discount = product.discountPercentage || 0;
           const priceAfterDiscount = product.price * (1 - discount / 100);
-          const productRevenue = item.quantity * priceAfterDiscount;
 
-          const method = item.paymentMethod?.name || "Unknown";
+          const splits =
+            Array.isArray(item.paymentSplits) && item.paymentSplits.length > 0
+              ? item.paymentSplits
+              : [
+                  {
+                    quantity: item.quantity,
+                    paymentMethod: item.paymentMethod,
+                  },
+                ];
 
-          revenueByPaymentMethod[method] =
-            (revenueByPaymentMethod[method] || 0) + productRevenue;
+          for (const split of splits) {
+            const method =
+              split.paymentMethod?.name ||
+              item.paymentMethod?.name ||
+              "Unknown";
+            const productRevenue = (split.quantity || 0) * priceAfterDiscount;
 
-          currentWeekRevenue += productRevenue;
-          dailyRevenue[orderDate] += productRevenue;
+            revenueByPaymentMethod[method] =
+              (revenueByPaymentMethod[method] || 0) + productRevenue;
+
+            currentWeekRevenue += productRevenue;
+            dailyRevenue[orderDate] += productRevenue;
+          }
         }
       }
     }
@@ -464,13 +507,29 @@ const getRevenueBetweenDates = async (req, res) => {
 
           const discount = product.discountPercentage || 0;
           const priceAfterDiscount = product.price * (1 - discount / 100);
-          const productRevenue = item.quantity * priceAfterDiscount;
 
-          const methodName = item.paymentMethod?.name || "Unknown";
-          revenueByPaymentMethod[methodName] =
-            (revenueByPaymentMethod[methodName] || 0) + productRevenue;
+          const splits =
+            Array.isArray(item.paymentSplits) && item.paymentSplits.length > 0
+              ? item.paymentSplits
+              : [
+                  {
+                    quantity: item.quantity,
+                    paymentMethod: item.paymentMethod,
+                  },
+                ];
 
-          revenue[key] += productRevenue;
+          for (const split of splits) {
+            const methodName =
+              split.paymentMethod?.name ||
+              item.paymentMethod?.name ||
+              "Unknown";
+            const productRevenue = (split.quantity || 0) * priceAfterDiscount;
+
+            revenueByPaymentMethod[methodName] =
+              (revenueByPaymentMethod[methodName] || 0) + productRevenue;
+
+            revenue[key] += productRevenue;
+          }
         }
       }
     }

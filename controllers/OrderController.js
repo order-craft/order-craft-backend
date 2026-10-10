@@ -893,9 +893,17 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
               const previousPayedQuantity = product.payedQuantity;
 
               product.payedQuantity += quantityToPay;
-              if (!product.paymentMethod && paymentMethod) {
-                product.paymentMethod = paymentMethod;
-              }
+
+              if (!Array.isArray(product.paymentSplits))
+                product.paymentSplits = [];
+              product.paymentSplits.push({
+                quantity: quantityToPay,
+                paymentMethod: paymentMethod,
+                paidAt: new Date(),
+              });
+
+              product.paymentMethod = paymentMethod;
+
               totalPaidAmount += quantityToPay * product.productDetails.price;
 
               // Add to decrement list if this product now has newly paid quantities
@@ -1108,9 +1116,18 @@ const confirmSelectedProductsPayments = async (req, res) => {
               const remainingQuantity = item.quantity - item.payedQuantity;
               const quantityToPay = Math.min(selectedCount, remainingQuantity);
               item.payedQuantity += quantityToPay;
-              if (!item.paymentMethod) {
-                item.paymentMethod = paymentMethod;
-              }
+
+              // Record this payment chunk with its own method
+              if (!Array.isArray(item.paymentSplits)) item.paymentSplits = [];
+              item.paymentSplits.push({
+                quantity: quantityToPay,
+                paymentMethod: paymentMethod,
+                paidAt: new Date(),
+              });
+
+              // Keep the "last used method" for quick display
+              item.paymentMethod = paymentMethod;
+
               totalPaidAmount += quantityToPay * item.productDetails.price;
             }
           }
@@ -1164,13 +1181,11 @@ const confirmSelectedProductsPayments = async (req, res) => {
         await order.save({ session });
 
         updatedOrder = order;
-        req.io
-          .to(String(order.superClientId))
-          .emit("orderUpdated", {
-            _id: order._id,
-            payed: order.payed,
-            status: order.status,
-          });
+        req.io.to(String(order.superClientId)).emit("orderUpdated", {
+          _id: order._id,
+          payed: order.payed,
+          status: order.status,
+        });
         // Archive table orders if all are paid
         const unpaidOrders = await Order.find({
           table: order.table,
