@@ -894,8 +894,9 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 
               product.payedQuantity += quantityToPay;
 
-              if (!Array.isArray(product.paymentSplits))
+              if (!Array.isArray(product.paymentSplits)) {
                 product.paymentSplits = [];
+              }
               product.paymentSplits.push({
                 quantity: quantityToPay,
                 paymentMethod: paymentMethod,
@@ -1117,15 +1118,15 @@ const confirmSelectedProductsPayments = async (req, res) => {
               const quantityToPay = Math.min(selectedCount, remainingQuantity);
               item.payedQuantity += quantityToPay;
 
-              // Record this payment chunk with its own method
-              if (!Array.isArray(item.paymentSplits)) item.paymentSplits = [];
+              if (!Array.isArray(item.paymentSplits)) {
+                item.paymentSplits = [];
+              }
               item.paymentSplits.push({
                 quantity: quantityToPay,
                 paymentMethod: paymentMethod,
                 paidAt: new Date(),
               });
 
-              // Keep the "last used method" for quick display
               item.paymentMethod = paymentMethod;
 
               totalPaidAmount += quantityToPay * item.productDetails.price;

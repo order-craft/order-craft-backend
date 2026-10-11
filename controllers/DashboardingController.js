@@ -26,6 +26,10 @@ const getDailyRevenue = async (req, res) => {
         select: "name",
       },
       {
+        path: "products.paymentSplits.paymentMethod",
+        select: "name",
+      },
+      {
         path: "paymentMethod",
         select: "name",
       },
@@ -112,7 +116,8 @@ const getMonthlyRevenue = async (req, res) => {
     })
       .populate("products.product")
       .populate("paymentMethod")
-      .populate("products.paymentMethod");
+      .populate("products.paymentMethod")
+      .populate("products.paymentSplits.paymentMethod");
 
     const revenueByDay = {};
     const revenueByPaymentMethod = {};
@@ -316,7 +321,8 @@ const getWeeklyRevenue = async (req, res) => {
       })
         .populate("products.product")
         .populate("paymentMethod")
-        .populate("products.paymentMethod"),
+        .populate("products.paymentMethod")
+        .populate("products.paymentSplits.paymentMethod"),
       Order.find({
         status: "archived",
         timestamp: { $gte: prevStartDate, $lte: prevEndDate },
@@ -463,8 +469,8 @@ const getRevenueBetweenDates = async (req, res) => {
     })
       .populate("products.product")
       .populate("paymentMethod")
-      .populate("products.paymentMethod");
-
+      .populate("products.paymentMethod")
+      .populate("products.paymentSplits.paymentMethod");
     if (orders.length === 0) {
       return res
         .status(404)
