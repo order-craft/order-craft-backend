@@ -162,6 +162,11 @@ const userSchema = new Schema({
       return this.role === "superClient";
     },
   },
+  brandColor: {
+    type: String,
+    default: "#8B5A2B",
+    match: /^#([0-9A-Fa-f]{6})$/,
+  },
   statusFlowEnabled: {
     type: Boolean,
     default: true,

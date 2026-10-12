@@ -481,7 +481,7 @@ const getUserById = async (req, res) => {
 
     // Ne sélectionne que les champs non sensibles à renvoyer
     const user = await User.findById(userId).select(
-      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled",
+      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled brandColor",
     );
 
     if (!user) {
@@ -578,6 +578,7 @@ const updateBusinessDetails = async (req, res) => {
       logoPreview,
       picturePreview,
       statusFlowEnabled,
+      brandColor,
     } = req.body.placeData;
 
     const userId = req.superClientId;
@@ -616,7 +617,13 @@ const updateBusinessDetails = async (req, res) => {
     if (typeof statusFlowEnabled === "boolean") {
       updateData.statusFlowEnabled = statusFlowEnabled;
     }
-
+    // Persist brand color when a valid hex is supplied
+    if (
+      typeof brandColor === "string" &&
+      /^#([0-9A-Fa-f]{6})$/.test(brandColor)
+    ) {
+      updateData.brandColor = brandColor;
+    }
     // Handle image uploads if provided
     if (logoPreview) {
       const uploadedLogo = await cloudinary.uploader.upload(logoPreview, {
@@ -640,10 +647,15 @@ const updateBusinessDetails = async (req, res) => {
     await User.findByIdAndUpdate(userId, updateData);
 
     // Live-notify every open client tab of this tenant
+    const notifyPayload = {};
     if (typeof statusFlowEnabled === "boolean") {
-      req.io
-        .to(userId.toString())
-        .emit("tenantConfigChanged", { statusFlowEnabled });
+      notifyPayload.statusFlowEnabled = statusFlowEnabled;
+    }
+    if (typeof updateData.brandColor === "string") {
+      notifyPayload.brandColor = updateData.brandColor;
+    }
+    if (Object.keys(notifyPayload).length > 0) {
+      req.io.to(userId.toString()).emit("tenantConfigChanged", notifyPayload);
     }
 
     logger.info(`Business details updated for user ${userId}`);
@@ -923,8 +935,8 @@ const qrLogin = async (req, res) => {
         .json({ msg: "SuperClient not found or not authorized" });
     }
 
-    const { placeName, placeLocation, distance, placeLogo } = superClientData;
-
+    const { placeName, placeLocation, distance, placeLogo, brandColor } =
+      superClientData;
     // ─── Server-side geolocation check ────────────────────────
     const guestLocation = { lat, lon };
     const cafeLocation = {
@@ -985,6 +997,7 @@ const qrLogin = async (req, res) => {
           distance,
           placeLogo,
           statusFlowEnabled: superClientData.statusFlowEnabled !== false,
+          brandColor: brandColor || "#8B5A2B",
         });
       },
     );
