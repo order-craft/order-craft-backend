@@ -759,11 +759,13 @@ const getUserArchivedOrders = async (req, res) => {
         productName: productEntry.productDetails.name,
         productPrice: productEntry.productDetails.price,
         quantity: productEntry.quantity,
-        totalPrice: productEntry.quantity * productEntry.productDetails.price, // Calculate total for each product
+        totalPrice: productEntry.quantity * productEntry.productDetails.price,
       })),
-      totalPrice: order.totalPrice, // The total price of the entire order
-      tips: order.tips,
-      timestamp: order.timestamp, // Timestamp when the order was placed
+      totalPrice: order.totalPrice ?? 0,
+      tips: order.tips ?? 0,
+      timestamp: order.timestamp,
+      userFullName: order.user?.fullName,
+      userId: order.user?._id ?? null,
     }));
 
     // Calculate the overall total revenue for all orders combined
@@ -790,11 +792,16 @@ const getUserArchivedOrders = async (req, res) => {
 };
 const getAllUserArchivedOrders = async (req, res) => {
   const userId = req.userId; // authenticated user's ID
-  const { startDate, endDate } = req.body; // read from request body
+  const { startDate, endDate, userId: filterUserId } = req.body;
+
+  // A superClient can pass `userId` in the body to filter by a specific
+  // waiter. A regular client is always scoped to their own user id.
+  const effectiveUserId =
+    req.role === "superClient" && filterUserId ? filterUserId : userId;
 
   try {
     // Build the base query
-    const match = { status: "archived", user: userId };
+    const match = { status: "archived", user: effectiveUserId };
 
     // If both dates are provided, add a timestamp filter
     if (startDate || endDate) {
@@ -843,6 +850,7 @@ const getAllUserArchivedOrders = async (req, res) => {
       tips: order.tips ?? 0,
       timestamp: order.timestamp,
       userFullName: order.user?.fullName,
+      userId: order.user?._id ?? null,
     }));
 
     const totalRevenue = orderData.reduce(

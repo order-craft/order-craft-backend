@@ -101,7 +101,7 @@ const updateTable = async (req, res) => {
     const updatedTable = await Table.findOneAndUpdate(
       { _id: req.params.id, superClient: req.superClientId },
       req.body,
-      { new: true }
+      { new: true },
     );
 
     if (!updatedTable) {
@@ -184,7 +184,7 @@ const getTableById = async (req, res) => {
 
     if (!table) {
       console.log(
-        `Table with ID: ${id} not found or does not belong to SuperClient ID: ${superClient}`
+        `Table with ID: ${id} not found or does not belong to SuperClient ID: ${superClient}`,
       );
       return res.status(404).json({ error: "Table not found" });
     }
@@ -242,7 +242,7 @@ const moveOrdersToTable = async (req, res) => {
 
     await Order.updateMany(
       { _id: { $in: orderIds } },
-      { $set: { table: targetTableId } }
+      { $set: { table: targetTableId } },
     );
 
     // Add orders to the target table
@@ -250,7 +250,7 @@ const moveOrdersToTable = async (req, res) => {
 
     // Remove orders from the source table (keep only archived orders)
     sourceTable.orders = sourceTable.orders.filter(
-      (order) => order.status === "archived"
+      (order) => order.status === "archived",
     );
 
     // Save both tables
@@ -281,7 +281,7 @@ const createReservation = async (req, res) => {
     const conflictingReservation = table.reservations.find(
       (reservation) =>
         new Date(startTime) < new Date(reservation.endTime) &&
-        new Date(endTime) > new Date(reservation.startTime)
+        new Date(endTime) > new Date(reservation.startTime),
     );
 
     if (conflictingReservation) {
@@ -332,7 +332,7 @@ const checkTableAvailability = async (req, res) => {
     const isAvailable = !table.reservations.some(
       (reservation) =>
         new Date(startTime) < new Date(reservation.endTime) &&
-        new Date(endTime) > new Date(reservation.startTime)
+        new Date(endTime) > new Date(reservation.startTime),
     );
 
     res.status(200).json({ available: isAvailable });
@@ -352,7 +352,7 @@ const deleteReservation = async (req, res) => {
     }
 
     const reservationIndex = table.reservations.findIndex(
-      (reservation) => reservation._id.toString() === reservationId
+      (reservation) => reservation._id.toString() === reservationId,
     );
 
     if (reservationIndex === -1) {
@@ -383,7 +383,7 @@ const updateReservation = async (req, res) => {
     }
 
     const reservation = table.reservations.find(
-      (reservation) => reservation._id.toString() === reservationId
+      (reservation) => reservation._id.toString() === reservationId,
     );
 
     if (!reservation) {
@@ -395,7 +395,7 @@ const updateReservation = async (req, res) => {
       (res) =>
         res._id.toString() !== reservationId &&
         new Date(startTime) < new Date(res.endTime) &&
-        new Date(endTime) > new Date(res.startTime)
+        new Date(endTime) > new Date(res.startTime),
     );
 
     if (conflictingReservation) {
@@ -434,7 +434,7 @@ const getAllReservations = async (req, res) => {
           id: table._id,
           number: table.number,
         },
-      }))
+      })),
     );
 
     res.status(200).json({ reservations });
@@ -467,7 +467,7 @@ const getTablesWithReservations = async (req, res) => {
         .filter(
           (reservation) =>
             new Date(reservation.startTime) >= startOfDay &&
-            new Date(reservation.startTime) <= endOfDay
+            new Date(reservation.startTime) <= endOfDay,
         )
         .sort((a, b) => new Date(a.startTime) - new Date(b.startTime)), // Sort reservations by time
     }));
@@ -519,7 +519,7 @@ const getRevenueByTable = async (req, res) => {
 
     // Convert to array and sort by table number (ascending)
     const formattedRevenue = Object.values(revenueByTable).sort(
-      (a, b) => a.tableNumber - b.tableNumber
+      (a, b) => a.tableNumber - b.tableNumber,
     );
 
     res.status(200).json(formattedRevenue);
@@ -532,13 +532,41 @@ const getRevenueByTable = async (req, res) => {
 };
 const getRevenueByTableArchived = async (req, res) => {
   const superClientId = req.superClientId;
+  const { period = "all" } = req.query;
+
+  // Build timestamp filter from period
+  const now = new Date();
+  let fromDate = null;
+  switch (period) {
+    case "today": {
+      fromDate = new Date(now);
+      fromDate.setHours(0, 0, 0, 0);
+      break;
+    }
+    case "week": {
+      fromDate = new Date(now);
+      fromDate.setDate(fromDate.getDate() - 6);
+      fromDate.setHours(0, 0, 0, 0);
+      break;
+    }
+    case "month": {
+      fromDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      break;
+    }
+    case "all":
+    default:
+      fromDate = null;
+      break;
+  }
 
   try {
-    // Fetch orders with table information
-    const orders = await Order.find({
-      status: ["archived"],
-      superClientId: superClientId,
-    }).populate("table", "number"); // Assuming 'table' is a reference to a Table model with 'number' field
+    const query = {
+      status: "archived",
+      superClientId,
+    };
+    if (fromDate) query.timestamp = { $gte: fromDate };
+
+    const orders = await Order.find(query).populate("table", "number");
 
     // Calculate revenue by table
     const revenueByTable = orders.reduce((result, order) => {
@@ -569,7 +597,7 @@ const getRevenueByTableArchived = async (req, res) => {
 
     // Convert to array and sort by table number (ascending)
     const formattedRevenue = Object.values(revenueByTable).sort(
-      (a, b) => a.tableNumber - b.tableNumber
+      (a, b) => a.tableNumber - b.tableNumber,
     );
 
     res.status(200).json(formattedRevenue);

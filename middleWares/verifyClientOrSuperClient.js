@@ -11,14 +11,18 @@ const verifyClientOrSuperClient = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
     req.userId = decoded.userId;
     if (decoded.role === "superClient") {
-      req.superClientId = decoded.userId; // Assuming the superClient ID is in the token
+      req.superClientId = decoded.userId;
+      req.role = decoded.role;
+
       return next();
     }
 
     if (decoded.role === "client") {
       const user = await User.findById(decoded.userId);
       if (user && user.superClient) {
-        req.superClientId = user.superClient; // Assuming the superClient ID is in the user's document
+        req.superClientId = user.superClient; 
+        req.role = decoded.role;
+
         return next();
       }
     }
