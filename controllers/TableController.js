@@ -532,47 +532,34 @@ const getRevenueByTable = async (req, res) => {
 };
 const getRevenueByTableArchived = async (req, res) => {
   const superClientId = req.superClientId;
-  const { period = "all" } = req.query;
+  const { from, to } = req.query;
 
-  // Build timestamp filter from period
-  const now = new Date();
-  let fromDate = null;
-  switch (period) {
-    case "today": {
-      fromDate = new Date(now);
-      fromDate.setHours(0, 0, 0, 0);
-      break;
+  // Optional date range — if either is missing, no date filter is applied.
+  const dateFilter = {};
+  if (from || to) {
+    dateFilter.timestamp = {};
+    if (from) {
+      const f = new Date(from);
+      f.setHours(0, 0, 0, 0);
+      dateFilter.timestamp.$gte = f;
     }
-    case "week": {
-      fromDate = new Date(now);
-      fromDate.setDate(fromDate.getDate() - 6);
-      fromDate.setHours(0, 0, 0, 0);
-      break;
+    if (to) {
+      const t = new Date(to);
+      t.setHours(23, 59, 59, 999);
+      dateFilter.timestamp.$lte = t;
     }
-    case "month": {
-      fromDate = new Date(now.getFullYear(), now.getMonth(), 1);
-      break;
-    }
-    case "all":
-    default:
-      fromDate = null;
-      break;
   }
 
   try {
-    const query = {
+    const orders = await Order.find({
       status: "archived",
-      superClientId,
-    };
-    if (fromDate) query.timestamp = { $gte: fromDate };
+      superClientId: superClientId,
+      ...dateFilter,
+    }).populate("table", "number");
 
-    const orders = await Order.find(query).populate("table", "number");
-
-    // Calculate revenue by table
     const revenueByTable = orders.reduce((result, order) => {
-      const tableNumber = order.table?.number; // Using optional chaining in case table reference is missing
-
-      if (!tableNumber) return result; // Skip if no table number
+      const tableNumber = order.table?.number;
+      if (!tableNumber) return result;
 
       if (!result[tableNumber]) {
         result[tableNumber] = {
@@ -581,7 +568,6 @@ const getRevenueByTableArchived = async (req, res) => {
         };
       }
 
-      // Calculate order total (products + tips)
       const orderTotal =
         order.products.reduce((sum, productEntry) => {
           return (
@@ -595,7 +581,6 @@ const getRevenueByTableArchived = async (req, res) => {
       return result;
     }, {});
 
-    // Convert to array and sort by table number (ascending)
     const formattedRevenue = Object.values(revenueByTable).sort(
       (a, b) => a.tableNumber - b.tableNumber,
     );
@@ -603,7 +588,7 @@ const getRevenueByTableArchived = async (req, res) => {
     res.status(200).json(formattedRevenue);
   } catch (error) {
     res.status(500).json({
-      message: "Failed to retrieve revenue by table",
+      message: "Failed to retrieve live revenue by table",
       error: error.message,
     });
   }
