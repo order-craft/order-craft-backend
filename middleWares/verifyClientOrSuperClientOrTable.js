@@ -18,7 +18,13 @@ const verifyClientOrSuperClientOrTable = async (req, res, next) => {
     if (decoded.role === "client") {
       const user = await User.findById(decoded.userId);
       if (user && user.superClient) {
+        if (!user.verified) {
+          return res
+            .status(403)
+            .json({ error: "Access denied. Account is inactive." });
+        }
         req.superClientId = user.superClient; // Assuming the superClient ID is in the user's document
+        req.userId = decoded.userId;
         return next();
       }
     }

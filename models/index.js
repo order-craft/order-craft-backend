@@ -4,6 +4,7 @@ const Menu = require("./Menu");
 const { Table, Plan } = require("./Table");
 const Order = require("./Order");
 const User = require("./User");
+const Notification = require("./Notification");
 module.exports = {
   Product,
   Category,
@@ -12,4 +13,5 @@ module.exports = {
   Order,
   User,
   Plan,
+  Notification,
 };

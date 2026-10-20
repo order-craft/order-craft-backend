@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const { validationResult } = require("express-validator");
 const User = require("../models/User");
 const { Table } = require("../models/Table");
+const Order = require("../models/Order");
 const nodemailer = require("nodemailer");
 const cloudinary = require("../Cloudinary/cloudinary");
 const logger = require("../logger"); // Import the logger
@@ -481,7 +482,7 @@ const getUserById = async (req, res) => {
 
     // Ne sélectionne que les champs non sensibles à renvoyer
     const user = await User.findById(userId).select(
-      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled brandColor",
+      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled brandColor participatesInService orderWorkflowMode preparationMode",
     );
 
     if (!user) {
@@ -579,6 +580,9 @@ const updateBusinessDetails = async (req, res) => {
       picturePreview,
       statusFlowEnabled,
       brandColor,
+      participatesInService,
+      orderWorkflowMode,
+      preparationMode,
     } = req.body.placeData;
 
     const userId = req.superClientId;
@@ -624,6 +628,24 @@ const updateBusinessDetails = async (req, res) => {
     ) {
       updateData.brandColor = brandColor;
     }
+    // Admin opt-in: be notified and act like staff for support requests
+    // and order notifications on tables assigned to them.
+    if (typeof participatesInService === "boolean") {
+      updateData.participatesInService = participatesInService;
+    }
+    // Order workflow mode toggle: "existing" (default, unchanged behavior)
+    // vs "shared_delivery" (any service-enabled staffer can claim a ready
+    // order). Enum-validated, not just type-checked, since an invalid
+    // string here would otherwise silently corrupt the tenant's setting.
+    if (["existing", "shared_delivery"].includes(orderWorkflowMode)) {
+      updateData.orderWorkflowMode = orderWorkflowMode;
+    }
+    // Preparation workflow toggle: "required" (default, unchanged behavior)
+    // vs "direct_service" (orders skip the prep step and are immediately
+    // eligible for service). Independent of statusFlowEnabled/orderWorkflowMode.
+    if (["required", "direct_service"].includes(preparationMode)) {
+      updateData.preparationMode = preparationMode;
+    }
     // Handle image uploads if provided
     if (logoPreview) {
       const uploadedLogo = await cloudinary.uploader.upload(logoPreview, {
@@ -653,6 +675,12 @@ const updateBusinessDetails = async (req, res) => {
     }
     if (typeof updateData.brandColor === "string") {
       notifyPayload.brandColor = updateData.brandColor;
+    }
+    if (typeof updateData.orderWorkflowMode === "string") {
+      notifyPayload.orderWorkflowMode = updateData.orderWorkflowMode;
+    }
+    if (typeof updateData.preparationMode === "string") {
+      notifyPayload.preparationMode = updateData.preparationMode;
     }
     if (Object.keys(notifyPayload).length > 0) {
       req.io.to(userId.toString()).emit("tenantConfigChanged", notifyPayload);
@@ -1222,6 +1250,181 @@ const updateUser = async (req, res) => {
   }
 };
 
+// Enable/remove the "preparation" and/or "service" (delivery-eligible,
+// shared_delivery mode) responsibilities on a staff account. Each flag is
+// independently optional — the caller sends whichever one(s) it's toggling.
+// Table-service responsibility (existing mode) is managed separately,
+// through table assignment (see TableController.assignStaffToTable) — a
+// table is assigned to a server, not the other way around.
+const updateStaffResponsibilities = async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const superClientId = req.superClientId;
+    const { canPrepare, canDeliver } = req.body;
+
+    const hasCanPrepare = typeof canPrepare === "boolean";
+    const hasCanDeliver = typeof canDeliver === "boolean";
+    if (!hasCanPrepare && !hasCanDeliver) {
+      return res.status(400).json({
+        message: "Provide 'canPrepare' and/or 'canDeliver' as a boolean.",
+      });
+    }
+
+    const target = await User.findOne({
+      _id: userId,
+      superClient: superClientId,
+      role: "client",
+    });
+    if (!target) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Avoid assigning new responsibilities to inactive accounts. Removing
+    // a responsibility from an already-inactive account is harmless and
+    // kept allowed (e.g. cleaning up before reactivation).
+    if (!target.verified && ((hasCanPrepare && canPrepare) || (hasCanDeliver && canDeliver))) {
+      return res.status(400).json({
+        message: "Cannot assign responsibilities to an inactive account",
+      });
+    }
+
+    if (hasCanPrepare) target.canPrepare = canPrepare;
+    if (hasCanDeliver) target.canDeliver = canDeliver;
+    await target.save();
+
+    res.status(200).json({
+      message: "Responsibilities updated successfully",
+      user: {
+        _id: target._id,
+        fullName: target.fullName,
+        canPrepare: target.canPrepare,
+        canDeliver: target.canDeliver,
+      },
+    });
+  } catch (error) {
+    logger.error("Error updating staff responsibilities:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// Admin-facing workload overview: every staff account for this tenant with
+// their responsibilities, table assignments, and real metrics computed from
+// persisted orders. Separate from getClientsBySuperClientId so the existing
+// staff list endpoint stays untouched.
+const getStaffOverview = async (req, res) => {
+  try {
+    const superClientId = req.superClientId;
+
+    const staff = await User.find({
+      role: "client",
+      superClient: superClientId,
+    }).select("fullName email verified canPrepare canDeliver");
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const overview = await Promise.all(
+      staff.map(async (member) => {
+        const assignedTables = await Table.find({
+          user: member._id,
+          superClient: superClientId,
+        }).select("number");
+        const tableIds = assignedTables.map((t) => t._id);
+
+        let tableService = null;
+        if (tableIds.length > 0) {
+          const [activeOrders, readyAwaitingDelivery] = await Promise.all([
+            Order.countDocuments({
+              superClientId,
+              table: { $in: tableIds },
+              status: { $in: ["pending", "preparing", "completed"] },
+            }),
+            Order.countDocuments({
+              superClientId,
+              table: { $in: tableIds },
+              status: "completed",
+              deliveredAt: null,
+            }),
+          ]);
+
+          const deliveredToday = await Order.find({
+            superClientId,
+            deliveredBy: member._id,
+            deliveredAt: { $gte: startOfDay },
+          }).select("deliveredAt statusTimestamps");
+
+          let avgDeliveryMinutes = null;
+          if (deliveredToday.length > 0) {
+            const durations = deliveredToday
+              .filter((o) => o.statusTimestamps?.completed)
+              .map(
+                (o) =>
+                  (new Date(o.deliveredAt) -
+                    new Date(o.statusTimestamps.completed)) /
+                  60000,
+              )
+              .filter((m) => m >= 0);
+            if (durations.length > 0) {
+              avgDeliveryMinutes =
+                Math.round(
+                  (durations.reduce((a, b) => a + b, 0) / durations.length) *
+                    10,
+                ) / 10;
+            }
+          }
+
+          tableService = {
+            activeOrders,
+            readyAwaitingDelivery,
+            deliveredToday: deliveredToday.length,
+            avgDeliveryMinutes,
+          };
+        }
+
+        let preparation = null;
+        if (member.canPrepare) {
+          const [pendingCount, preparingCount] = await Promise.all([
+            Order.countDocuments({ superClientId, status: "pending" }),
+            Order.countDocuments({ superClientId, status: "preparing" }),
+          ]);
+          preparation = {
+            pendingOrders: pendingCount,
+            preparingOrders: preparingCount,
+          };
+        }
+
+        return {
+          _id: member._id,
+          fullName: member.fullName,
+          email: member.email,
+          verified: member.verified,
+          canPrepare: member.canPrepare,
+          canDeliver: member.canDeliver,
+          assignedTables: assignedTables.map((t) => ({
+            _id: t._id,
+            number: t.number,
+          })),
+          tableService,
+          preparation,
+          needsAttention:
+            (!member.verified &&
+              (member.canPrepare || member.canDeliver || tableIds.length > 0)) ||
+            false,
+        };
+      }),
+    );
+
+    res.status(200).json({
+      staff: overview,
+      reportDate: startOfDay.toISOString(),
+      note: "preparation metrics are tenant-wide kitchen queue counts (shared across all preparation staff), not per-person — the kitchen queue isn't assigned to individuals.",
+    });
+  } catch (error) {
+    logger.error("Error building staff overview:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -1245,4 +1448,6 @@ module.exports = {
   sendChangePersonalDettailsVerifCode,
   changeSuperClientPD,
   updateBusinessDetails,
+  updateStaffResponsibilities,
+  getStaffOverview,
 };

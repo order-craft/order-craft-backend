@@ -161,6 +161,7 @@ const createSupportRequest = async ({
     return {
       ...savedSupport.toObject(),
       tableNumber, // Include the original table number in the response
+      tableUser: table.user, // Assigned server for this table, if any
     };
   } catch (error) {
     logger.error("Error creating support request:", error);

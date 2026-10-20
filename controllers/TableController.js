@@ -113,6 +113,50 @@ const updateTable = async (req, res) => {
   }
 };
 
+// Assign (or unassign) the table-service server responsible for a table.
+// Kept separate from the generic updateTable so assignment gets its own
+// validation: the target must be an active staff account belonging to this
+// same tenant. Pass userId: null to unassign.
+const assignStaffToTable = async (req, res) => {
+  try {
+    const superClientId = req.superClientId;
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    const table = await Table.findOne({ _id: id, superClient: superClientId });
+    if (!table) {
+      return res.status(404).json({ error: "Table not found" });
+    }
+
+    if (userId) {
+      const staff = await User.findOne({
+        _id: userId,
+        role: "client",
+        superClient: superClientId,
+      });
+      if (!staff) {
+        return res
+          .status(404)
+          .json({ error: "Staff account not found for this restaurant" });
+      }
+      if (!staff.verified) {
+        return res.status(400).json({
+          error: "Cannot assign a table to an inactive staff account",
+        });
+      }
+      table.user = staff._id;
+    } else {
+      table.user = undefined;
+    }
+
+    await table.save();
+    const populated = await table.populate("user", "fullName email verified");
+    res.status(200).json({ table: populated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // Delete a table and its associated orders
 const deleteTable = async (req, res) => {
   try {
@@ -609,6 +653,39 @@ const getRevenueByTableArchived = async (req, res) => {
   }
 };
 
+// All tables for this tenant with their assigned table-service server (if
+// any), flagging tables that are unassigned or whose assigned server is
+// inactive — the admin-facing "identify unresolved responsibilities" view.
+const getTablesAssignmentOverview = async (req, res) => {
+  try {
+    const superClientId = req.superClientId;
+    const tables = await Table.find({ superClient: superClientId })
+      .select("number user plan")
+      .populate("user", "fullName email verified")
+      .populate("plan", "name")
+      .sort({ number: 1 });
+
+    const result = tables.map((t) => ({
+      _id: t._id,
+      number: t.number,
+      plan: t.plan ? { _id: t.plan._id, name: t.plan.name } : null,
+      assignedTo: t.user
+        ? {
+            _id: t.user._id,
+            fullName: t.user.fullName,
+            email: t.user.email,
+            verified: t.user.verified,
+          }
+        : null,
+      needsAttention: !t.user || !t.user.verified,
+    }));
+
+    res.status(200).json({ tables: result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   createTable,
   getTables,
@@ -626,4 +703,6 @@ module.exports = {
   moveOrdersToTable,
   getRevenueByTable,
   getRevenueByTableArchived,
+  assignStaffToTable,
+  getTablesAssignmentOverview,
 };

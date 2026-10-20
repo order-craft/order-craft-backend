@@ -10,9 +10,15 @@ const jwt = require("jsonwebtoken");
 const logger = require("./logger"); // Custom logger
 const User = require("./models/User"); // User model
 const { Support } = require("./models/Support");
+const { Table } = require("./models/Table");
 const {
   createSupportRequest,
 } = require("./controllers/SupportRequestController");
+const {
+  resolveSupportRecipients,
+  notifySupportRequest,
+} = require("./Helpers/notifications");
+const Notification = require("./models/Notification");
 // Route imports
 const productRoutes = require("./routes/productRoutes");
 const menuRoutes = require("./routes/menuRoutes");
@@ -30,6 +36,7 @@ const dashboardRoutes = require("./routes/dashboardRoutes");
 const rawMaterialRoutes = require("./routes/rawMaterialRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const recipeRoutes = require("./routes/recipeRoutes");
+const notificationRoutes = require("./routes/notificationRoutes");
 
 dotenv.config(); // Load environment variables
 
@@ -99,6 +106,7 @@ app.use("/payment-methods", paymentMethodsRoutes);
 app.use("/raw-materials", rawMaterialRoutes);
 app.use("/inventory", inventoryRoutes);
 app.use("/recipes", recipeRoutes);
+app.use("/notifications", notificationRoutes);
 
 io.on("connection", async (socket) => {
   const token = socket.handshake.auth.token;
@@ -126,6 +134,13 @@ io.on("connection", async (socket) => {
       return socket.disconnect();
     }
 
+    // A deactivated staff account must not receive live updates or
+    // notifications, even if it still holds a valid (unexpired) JWT.
+    if (user.role === "client" && !user.verified) {
+      logger.warn(`Inactive client ${user._id} attempted socket connection`);
+      return socket.disconnect();
+    }
+
     // Room joining logic remains the same...
     if (user.role === "superClient") {
       // Superclient joins their own room
@@ -138,6 +153,12 @@ io.on("connection", async (socket) => {
         `Client ${user.fullName} joined superClient room ${user.superClient}`
       );
     }
+
+    // Every authenticated user also joins a personal room, used to push
+    // targeted notifications (new order / order ready) to the specific
+    // assigned table-service server without broadcasting to the whole
+    // tenant room above.
+    socket.join(`user:${user._id.toString()}`);
 
     // Modified support request handling
     socket.on("supportRequest", async (data) => {
@@ -155,17 +176,39 @@ io.on("connection", async (socket) => {
           superClientId,
         });
 
-        // Notify the SuperClient and their room
-        io.to(superClientId.toString()).emit("supportNotification", {
-          tableNumber,
-          requestType,
-          supportId: supportRequest._id, // Include the support request ID
-          createdAt: supportRequest.createdAt,
-          requestTypeName,
+        // Only the table's assigned server (plus the admin, if they opted
+        // in via participatesInService) gets paged — not the whole venue.
+        const recipientIds = await resolveSupportRecipients({
+          tableUserId: supportRequest.tableUser,
+          superClientId,
         });
 
+        recipientIds.forEach((id) => {
+          io.to(`user:${id}`).emit("supportNotification", {
+            tableNumber,
+            requestType,
+            supportId: supportRequest._id, // Include the support request ID
+            createdAt: supportRequest.createdAt,
+            requestTypeName,
+          });
+        });
+
+        // Also persist + push it into the regular notification bell, so it
+        // stays visible (and actionable) even if the ringtone popup is
+        // missed or dismissed, until it's accepted/declined.
+        notifySupportRequest({
+          io,
+          recipientIds,
+          superClientId,
+          support: supportRequest,
+          tableNumber,
+          requestTypeName,
+        }).catch((err) =>
+          logger.error("Failed to push support notification:", err),
+        );
+
         logger.info(
-          `Support request ${supportRequest._id} created for Table ${tableNumber}`
+          `Support request ${supportRequest._id} created for Table ${tableNumber} (notified ${recipientIds.length} recipient(s))`
         );
       } catch (error) {
         logger.error("Failed to create support request:", error);
@@ -216,15 +259,46 @@ io.on("connection", async (socket) => {
           return;
         }
 
-        // Notify the SuperClient and their room
+        // Clear the matching bell notification(s) for everyone who had one,
+        // so it stops showing as pending now that it's been accepted.
+        Notification.updateMany(
+          { support: supportId },
+          { read: true },
+        ).catch((err) =>
+          logger.error("Failed to mark support notifications read:", err),
+        );
+
+        // Notify the same people who got the original request (assigned
+        // server + opted-in admin), so their popup closes too.
+        const table = await Table.findOne({
+          number: tableNumber,
+          superClient: superClientId,
+        }).select("user");
+        const recipientIds = await resolveSupportRecipients({
+          tableUserId: table?.user,
+          superClientId,
+        });
+
         logger.debug(
-          `Notifying superClient ${superClientId} about answered call`,
+          `Notifying ${recipientIds.length} recipient(s) about answered call`,
           {
             tableNumber,
             supportId,
           }
         );
 
+        recipientIds.forEach((id) => {
+          io.to(`user:${id}`).emit("callAnswered", {
+            tableNumber,
+            supportId,
+          });
+        });
+
+        // The customer's guest session is issued with user.id = superClientId
+        // (see qrLogin), so their socket joins this same tenant room — it's
+        // the only way to reach them. Always include it here regardless of
+        // the admin's participatesInService setting, or the customer never
+        // learns their request was accepted.
         io.to(superClientId.toString()).emit("callAnswered", {
           tableNumber,
           supportId,
@@ -246,6 +320,26 @@ io.on("connection", async (socket) => {
           details: error.message,
         });
       }
+    });
+
+    // A staffer declined a support request instead of accepting it. Unlike
+    // acceptance, this doesn't mark the Support record answered — someone
+    // else (another staffer, or the same one later) can still pick it up —
+    // it only lets the customer know a human looked at it and couldn't take
+    // it right now, instead of leaving them wondering in silence.
+    socket.on("supportRequestDeclined", (data) => {
+      const { tableNumber, supportId } = data;
+      const superClientId =
+        user.role === "client" ? user.superClient : user._id;
+
+      io.to(superClientId.toString()).emit("supportRequestDeclined", {
+        tableNumber,
+        supportId,
+      });
+
+      logger.info(
+        `Support request ${supportId} declined for Table ${tableNumber}`
+      );
     });
 
     // Disconnect handler remains the same...

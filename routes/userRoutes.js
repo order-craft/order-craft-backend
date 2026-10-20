@@ -20,6 +20,8 @@ const {
   sendChangePersonalDettailsVerifCode,
   changeSuperClientPD,
   updateBusinessDetails,
+  updateStaffResponsibilities,
+  getStaffOverview,
 } = require("../controllers/UserController");
 const verifyToken = require("../middleWares/jerifyToken");
 const verifySuperClient = require("../middleWares/VerifySuperClient");
@@ -83,5 +85,11 @@ router.patch(
   "/superClient/:id/verify",
   verifySuperClient,
   changeUserVerificationStatus,
+);
+router.get("/superClient/staff-overview", verifySuperClient, getStaffOverview);
+router.patch(
+  "/superClient/:id/responsibilities",
+  verifySuperClient,
+  updateStaffResponsibilities,
 );
 module.exports = router;

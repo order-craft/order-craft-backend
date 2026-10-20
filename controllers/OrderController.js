@@ -10,6 +10,11 @@ const { decrementForOrder } = require("../Helpers/functions");
 const { buildProductCostSnapshot } = require("../Helpers/costHelpers");
 const OrderCounter = require("../models/OrderCounter");
 const { startOfDay, endOfDay } = require("date-fns");
+const {
+  notifyAssignedServer,
+  notifyPrepStaff,
+  notifyServiceStaff,
+} = require("../Helpers/notifications");
 
 const calculateTotalPrice = async (products) => {
   const productIds = products.map((item) => item.product);
@@ -128,9 +133,10 @@ const createOrder = async (req, res) => {
 
     // Read tenant config once
     const tenant = await User.findById(superClientId)
-      .select("statusFlowEnabled")
+      .select("statusFlowEnabled orderWorkflowMode")
       .session(session);
     const flowEnabled = tenant?.statusFlowEnabled !== false;
+    const sharedDelivery = tenant?.orderWorkflowMode === "shared_delivery";
     // 5️⃣ Calculate total price
     const totalPrice = await calculateTotalPrice(products);
 
@@ -215,6 +221,45 @@ const createOrder = async (req, res) => {
 
     // 1️⃣0️⃣ Emit to clients
     req.io.to(superClientId.toString()).emit("newOrder", payload);
+
+    // 1️⃣1️⃣ Notify the table's assigned table-service server, if any and
+    // active. Never blocks order creation on failure.
+    if (newOrder.table) {
+      notifyAssignedServer({
+        io: req.io,
+        table: newOrder.table,
+        superClientId,
+        type: "new_order",
+        order: newOrder,
+      }).catch((err) =>
+        console.error("Failed to notify assigned server:", err),
+      );
+    }
+
+    // 1️⃣2️⃣ Let the kitchen/preparation staff know a new order came in, even
+    // off Order Management — silent on the client, distinct from the
+    // assigned server's sound alert above. Skip the table's own assigned
+    // server if they're also prep staff, so that person isn't notified twice.
+    // Always fires, regardless of statusFlowEnabled/preparationMode —
+    // canPrepare staff should always hear about a new order.
+    notifyPrepStaff({
+      io: req.io,
+      superClientId,
+      order: newOrder,
+      excludeUserId: newOrder.table?.user || null,
+    }).catch((err) => console.error("Failed to notify prep staff:", err));
+
+    // 1️⃣3️⃣ "shared_delivery" mode only: every active service-enabled
+    // staffer gets paged too, regardless of table assignment — this is
+    // additive to (not a replacement for) the table-based alert above.
+    if (sharedDelivery) {
+      notifyServiceStaff({
+        io: req.io,
+        superClientId,
+        order: newOrder,
+        type: "new_order_service",
+      }).catch((err) => console.error("Failed to notify service staff:", err));
+    }
 
     return res.status(201).json({
       message: "Order created successfully",
@@ -1237,11 +1282,60 @@ const getOrdersBySuperClientIdFIFO = async (req, res) => {
   const superClientId = req.superClientId;
 
   try {
-    // Find orders with populated data
-    const orders = await Order.find({
+    const query = {
       superClientId: superClientId,
       status: { $ne: "archived" },
-    })
+    };
+
+    // Role/responsibility-aware filtering. This is the one endpoint behind
+    // the existing Order Management screen, so narrowing it here is what
+    // gives each server their "personal view" without a parallel API.
+    //
+    // - superClient (admin): always unrestricted.
+    // - client with canPrepare: unrestricted — preparation must see every
+    //   incoming order regardless of table assignment.
+    // - client with table assignments but no canPrepare: restricted to
+    //   orders on their assigned tables (their "personal view").
+    // - client with neither configured yet: unrestricted, so introducing
+    //   this feature never silently hides orders from staff an admin
+    //   hasn't assigned anything to yet.
+    const tenant = await User.findById(superClientId).select(
+      "statusFlowEnabled orderWorkflowMode preparationMode",
+    );
+    const sharedDelivery = tenant?.orderWorkflowMode === "shared_delivery";
+
+    let viewScope = "all";
+    let assignedTables = [];
+    let canPrepare = null;
+    let canDeliver = null;
+
+    if (req.role === "client") {
+      const me = await User.findById(req.userId).select("canPrepare canDeliver");
+      canPrepare = !!me?.canPrepare;
+      canDeliver = !!me?.canDeliver;
+
+      const myTables = await Table.find({
+        user: req.userId,
+        superClient: superClientId,
+      }).select("number");
+      assignedTables = myTables.map((t) => ({ _id: t._id, number: t.number }));
+
+      // A service-enabled staffer needs the tenant-wide view in shared
+      // delivery mode (to see/claim unassigned ready orders), same as
+      // canPrepare already grants — table assignment alone shouldn't
+      // restrict them in that mode.
+      if (
+        !canPrepare &&
+        assignedTables.length > 0 &&
+        !(sharedDelivery && canDeliver)
+      ) {
+        query.table = { $in: assignedTables.map((t) => t._id) };
+        viewScope = "mine";
+      }
+    }
+
+    // Find orders with populated data
+    const orders = await Order.find(query)
       .populate("products.product")
       .populate({
         path: "table",
@@ -1250,6 +1344,7 @@ const getOrdersBySuperClientIdFIFO = async (req, res) => {
           select: "name _id", // Include both name and _id
         },
       })
+      .populate("deliveryClaimedBy", "fullName")
       .sort({ timestamp: 1 });
 
     // Extract unique plans from the orders
@@ -1274,12 +1369,16 @@ const getOrdersBySuperClientIdFIFO = async (req, res) => {
       statusDurations: order.getStatusDurations(),
     }));
 
-    const tenant =
-      await User.findById(superClientId).select("statusFlowEnabled");
     res.status(200).json({
       orders: ordersWithDurations,
       plans: uniquePlans,
       statusFlowEnabled: tenant?.statusFlowEnabled !== false,
+      orderWorkflowMode: tenant?.orderWorkflowMode || "existing",
+      preparationMode: tenant?.preparationMode || "required",
+      viewScope,
+      assignedTables,
+      canPrepare,
+      canDeliver,
     });
   } catch (error) {
     console.error("Error retrieving orders:", error);
@@ -1293,14 +1392,45 @@ const updateOrderStatus = async (req, res) => {
   const superClientId = req.superClientId;
   // Enforce the tenant's flow setting on the server side
   // Read tenant config for this request
-  const tenant = await User.findById(superClientId).select("statusFlowEnabled");
+  const tenant = await User.findById(superClientId).select(
+    "statusFlowEnabled orderWorkflowMode preparationMode",
+  );
   const flowEnabled = tenant?.statusFlowEnabled !== false;
+  const sharedDelivery = tenant?.orderWorkflowMode === "shared_delivery";
+  const noPrepStage = tenant?.preparationMode === "direct_service";
   // Basic validation
   if (!mongoose.Types.ObjectId.isValid(orderId)) {
     return res.status(400).json({ error: "Invalid order ID" });
   }
   if (!["pending", "preparing", "completed", "cancelled"].includes(newStatus)) {
     return res.status(400).json({ error: "Unknown status value" });
+  }
+
+  // "direct_service" tenants have no preparation stage at all — reject the
+  // transition outright rather than just hiding the button on the frontend.
+  if (newStatus === "preparing" && noPrepStage) {
+    return res.status(400).json({
+      error: "Preparation is skipped for this tenant (Direct Service mode)",
+    });
+  }
+
+  // Driving the kitchen workflow (accepting an order into preparation, or
+  // marking it ready) is a preparation-staff action. A service/delivery-only
+  // staffer (canDeliver, no canPrepare) must not move it into "preparing"/
+  // "completed" themselves — they only act once it's ready, via the
+  // separate deliver/claim-delivery endpoint. This split holds in
+  // "direct_service" mode too: prep still completes it, delivery still only
+  // claims it afterward — direct_service just removes the "preparing" stage.
+  if (
+    (newStatus === "preparing" || newStatus === "completed") &&
+    req.role === "client"
+  ) {
+    const me = await User.findById(req.userId).select("canPrepare");
+    if (!me?.canPrepare) {
+      return res.status(403).json({
+        error: "Only preparation staff can move an order to this status",
+      });
+    }
   }
 
   const session = await mongoose.startSession();
@@ -1334,8 +1464,10 @@ const updateOrderStatus = async (req, res) => {
       }
 
       // When the flow is disabled, only allow the workflow on orders that
-      // were created while the flow was ON (i.e. they're already past pending).
-      // A pending/preparing order created pre-toggle must remain progressable.
+      // were created while the flow was ON (i.e. they're already past
+      // pending). A pending/preparing order created pre-toggle must remain
+      // progressable. (Direct Service orders legitimately start "pending"
+      // when the flow is on, so this guard is about statusFlowEnabled only.)
       if (
         !flowEnabled &&
         (newStatus === "pending" || newStatus === "preparing") &&
@@ -1414,6 +1546,34 @@ const updateOrderStatus = async (req, res) => {
     // Emit over WebSocket
     req.io.to(superClientId.toString()).emit("orderUpdated", updatedOrder);
 
+    // Notify the assigned table-service server that their table's order is
+    // ready. Only on the pending/preparing → completed transition — not on
+    // every save — and never blocks the response on failure.
+    if (newStatus === "completed" && updatedOrder.table) {
+      notifyAssignedServer({
+        io: req.io,
+        table: updatedOrder.table,
+        superClientId,
+        type: "order_ready",
+        order: updatedOrder,
+      }).catch((err) =>
+        console.error("Failed to notify assigned server:", err),
+      );
+    }
+
+    // "shared_delivery" mode only: every active service-enabled staffer
+    // gets paged too — table-independent, so not gated on updatedOrder.table.
+    if (newStatus === "completed" && sharedDelivery) {
+      notifyServiceStaff({
+        io: req.io,
+        superClientId,
+        order: updatedOrder,
+        type: "order_ready_service",
+      }).catch((err) =>
+        console.error("Failed to notify service staff:", err),
+      );
+    }
+
     // Construct response
     const response = {
       message: "Order status updated",
@@ -1443,6 +1603,204 @@ const updateOrderStatus = async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     session.endSession();
+  }
+};
+
+// Marks a "completed" (ready) order as delivered to the table. Kept as a
+// separate action from status, rather than a new status value, so the
+// existing pending → preparing → completed → archived flow (payment,
+// inventory decrement, etc.) is untouched. Authorization: the table's
+// currently assigned active table-service server, or an admin — and, only
+// when the table has no active assigned server, any active staff member
+// with table-service responsibility (so a ready order can never get stuck
+// with no one permitted to deliver it).
+const markOrderDelivered = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const superClientId = req.superClientId;
+    const callerId = (req.userId || req.superClientId).toString();
+
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({ error: "Invalid order ID" });
+    }
+
+    const order = await Order.findOne({
+      _id: orderId,
+      superClientId,
+    }).populate("table");
+
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (order.status !== "completed") {
+      return res
+        .status(400)
+        .json({ error: "Only ready (completed) orders can be delivered" });
+    }
+    if (order.deliveredAt) {
+      return res.status(400).json({ error: "Order already delivered" });
+    }
+
+    // A prior delivery claim — e.g. made while the tenant was in
+    // "shared_delivery" mode — takes precedence over table assignment.
+    // Switching the tenant back to "existing" must not silently transfer
+    // that responsibility to whoever the table happens to be assigned to,
+    // nor let anyone else deliver it out from under the claimer.
+    const claimedBy = order.deliveryClaimedBy?.toString() || null;
+    const iAmClaimer = claimedBy && claimedBy === callerId;
+
+    if (req.role !== "superClient" && claimedBy && !iAmClaimer) {
+      return res.status(403).json({
+        error: "This order was already accepted by another server",
+      });
+    }
+
+    if (req.role !== "superClient" && !claimedBy) {
+      const assignedServerId = order.table?.user?.toString();
+      const isAssignedServer =
+        assignedServerId && assignedServerId === req.userId?.toString();
+
+      if (!isAssignedServer) {
+        // No active assigned server for this table — fall back to any
+        // active staff member who has table-service responsibility.
+        const hasAnyTableAssignment = await Table.exists({
+          user: req.userId,
+          superClient: superClientId,
+        });
+        const assignedServerIsActive =
+          assignedServerId &&
+          (await User.exists({ _id: assignedServerId, verified: true }));
+
+        if (assignedServerIsActive || !hasAnyTableAssignment) {
+          return res.status(403).json({
+            error: "Only the assigned server or an admin can mark this delivered",
+          });
+        }
+      }
+    }
+
+    // Atomic, race-safe against a concurrent accept/claim/deliver on the
+    // same order — mirrors claimDelivery's findOneAndUpdate guard pattern.
+    // Also stamps deliveryClaimedBy (if not already set) so "who's
+    // responsible" stays tracked the same way regardless of which mode the
+    // order was actually delivered under — this is what lets claimDelivery
+    // correctly refuse to re-offer an already-delivered order for claiming
+    // after a later switch back to "shared_delivery".
+    const updated = await Order.findOneAndUpdate(
+      { _id: orderId, superClientId, status: "completed", deliveredAt: null },
+      {
+        $set: {
+          deliveredAt: new Date(),
+          deliveredBy: callerId,
+          ...(claimedBy
+            ? {}
+            : { deliveryClaimedBy: callerId, deliveryClaimedAt: new Date() }),
+        },
+      },
+      { new: true },
+    )
+      .populate("table")
+      .populate("products.product")
+      .populate("deliveryClaimedBy", "fullName");
+
+    if (!updated) {
+      return res.status(409).json({ error: "Order was already delivered" });
+    }
+
+    req.io.to(superClientId.toString()).emit("orderUpdated", updated);
+
+    return res.status(200).json({ message: "Order marked as delivered", order: updated });
+  } catch (error) {
+    console.error("Error marking order delivered:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// "shared_delivery" workflow mode only: any active service-enabled
+// (canDeliver) staffer — or an admin — can claim a ready, unclaimed order,
+// first-come-first-served. Claiming is distinct from delivering: it never
+// touches deliveredAt/deliveredBy, and no further click is required for
+// v1 — the claim itself is the terminal server-facing action.
+//
+// Concurrency: the atomic findOneAndUpdate below (matching only while
+// deliveryClaimedBy is still null) is what makes this race-safe — MongoDB
+// serializes writes to a single document, so of two near-simultaneous
+// claims exactly one query still matches and the other gets back null.
+// No transaction needed; this is a single-document conditional update.
+const claimDelivery = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const superClientId = req.superClientId;
+
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({ error: "Invalid order ID" });
+    }
+
+    const tenant = await User.findById(superClientId).select(
+      "orderWorkflowMode",
+    );
+    if (tenant?.orderWorkflowMode !== "shared_delivery") {
+      return res.status(400).json({
+        error: "Delivery claiming is not enabled for this tenant",
+      });
+    }
+
+    if (req.role === "client") {
+      const me = await User.findById(req.userId).select("canDeliver");
+      if (!me?.canDeliver) {
+        return res.status(403).json({
+          error: "Only service-enabled staff can claim a delivery",
+        });
+      }
+    }
+
+    const claimed = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        superClientId,
+        status: "completed",
+        deliveryClaimedBy: null,
+        // Never re-offer an order that was already delivered directly
+        // (e.g. under "existing" mode before switching to
+        // "shared_delivery") — it's genuinely done, not available.
+        deliveredAt: null,
+      },
+      {
+        $set: {
+          deliveryClaimedBy: req.userId || req.superClientId,
+          deliveryClaimedAt: new Date(),
+        },
+      },
+      { new: true },
+    )
+      .populate("table")
+      .populate("products.product")
+      .populate("deliveryClaimedBy", "fullName");
+
+    if (!claimed) {
+      const existing = await Order.findOne({ _id: orderId, superClientId }).select(
+        "status deliveryClaimedBy deliveredAt",
+      );
+      if (!existing) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      if (existing.status !== "completed") {
+        return res.status(400).json({ error: "Order is not ready" });
+      }
+      if (existing.deliveredAt) {
+        return res.status(400).json({ error: "Order was already delivered" });
+      }
+      return res.status(409).json({
+        error: "Already accepted by another server",
+      });
+    }
+
+    req.io.to(superClientId.toString()).emit("orderUpdated", claimed);
+
+    return res.status(200).json({ message: "Order claimed", order: claimed });
+  } catch (error) {
+    console.error("Error claiming delivery:", error);
+    return res.status(500).json({ error: "Internal server error" });
   }
 };
 
@@ -1500,4 +1858,6 @@ module.exports = {
   confirmSelectedNotDineinProductsPayments,
   tipOrder,
   deleteCancelledOrders,
+  markOrderDelivered,
+  claimDelivery,
 };

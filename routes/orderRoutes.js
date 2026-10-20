@@ -16,6 +16,8 @@ const {
   getNonDineInOrdersToday,
   confirmNotDineinSelectedOrder,
   confirmSelectedNotDineinProductsPayments,
+  markOrderDelivered,
+  claimDelivery,
 } = require("../controllers/OrderController");
 const decodeTableToken = require("../middleWares/decodeTableToken");
 //const verifySuperClient = require("../middleWares/VerifySuperClient");
@@ -35,6 +37,16 @@ router.patch(
   "/update-status/:orderId",
   verifyClientOrSuperClient,
   updateOrderStatus
+);
+router.patch(
+  "/:orderId/deliver",
+  verifyClientOrSuperClient,
+  markOrderDelivered
+);
+router.patch(
+  "/:orderId/claim-delivery",
+  verifyClientOrSuperClient,
+  claimDelivery
 );
 
 router.delete("/:orderId", verifyToken, deleteOrder);

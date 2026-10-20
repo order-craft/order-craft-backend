@@ -18,6 +18,8 @@ const {
   moveOrdersToTable,
   getRevenueByTable,
   getRevenueByTableArchived,
+  assignStaffToTable,
+  getTablesAssignmentOverview,
 } = require("../controllers/TableController");
 const verifySuperClient = require("../middleWares/VerifySuperClient");
 const {
@@ -41,9 +43,15 @@ router.get(
   verifySuperClient,
   getRevenueByTableArchived,
 );
+router.get(
+  "/assignments/overview",
+  verifySuperClient,
+  getTablesAssignmentOverview,
+); // Admin: all tables + assigned server + unresolved flags
 router.get("/:id", verifyClientOrSuperClient, getTableById); // Get a single table by ID
 router.post("/", verifySuperClient, createTable); // Create a new table
 router.put("/:id", verifySuperClient, updateTable); // Update an existing table
+router.patch("/:id/assign-staff", verifySuperClient, assignStaffToTable); // Assign/unassign table-service server
 router.delete("/:id", verifySuperClient, deleteTable); // Delete a table
 
 // Routes for reservation operations

@@ -187,6 +187,34 @@ const orderSchema = new Schema({
     ref: "PaymentMethod",
     required: false, // used only when all products are paid using the same method
   },
+  // Delivery tracking — distinct from "completed" (ready in the kitchen) and
+  // "archived" (paid/closed out). Neither existing status represents "handed
+  // to the table", so this is tracked separately rather than overloading an
+  // existing status value. Null until the assigned server (or an admin)
+  // performs the explicit delivery action.
+  deliveredAt: {
+    type: Date,
+    default: null,
+  },
+  deliveredBy: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  // "Shared delivery" mode claim record — who accepted responsibility for
+  // this ready order, and when. Deliberately distinct from
+  // deliveredAt/deliveredBy above: claiming is not the same as delivered,
+  // and this feature never sets those fields. Null/unset is also what
+  // makes the claim endpoint's atomic findOneAndUpdate race-safe.
+  deliveryClaimedBy: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  deliveryClaimedAt: {
+    type: Date,
+    default: null,
+  },
 });
 
 // the trigger is used to calculate each time the order spent in each status
