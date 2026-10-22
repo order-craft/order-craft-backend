@@ -10,6 +10,12 @@ const { decrementForOrder } = require("../Helpers/functions");
 const { buildProductCostSnapshot } = require("../Helpers/costHelpers");
 const OrderCounter = require("../models/OrderCounter");
 const { startOfDay, endOfDay } = require("date-fns");
+const {
+  canTransition,
+  nextAllowedStatuses,
+  normalizeOrderFlow,
+  isTerminal,
+} = require("../Helpers/orderFlow");
 
 const calculateTotalPrice = async (products) => {
   const productIds = products.map((item) => item.product);
@@ -239,6 +245,9 @@ const createOrder = async (req, res) => {
       ...populated,
       statusDurations: newOrder.getStatusDurations(),
       statusFlowEnabled: flowEnabled,
+      flowAtCreation: orderFlow,
+      allowedNext: nextAllowedStatuses(newOrder),
+      playSound: true,
     };
 
     // 1️⃣0️⃣ Emit to clients
@@ -616,7 +625,10 @@ const confirmSelectedPayments = async (req, res) => {
           } else if (!hasSomeProductWithPaymentMethod && paymentMethod) {
             order.paymentMethod = paymentMethod;
           }
-
+          if (isTerminal(order.status)) {
+            // Already archived / cancelled — skip this one.
+            continue;
+          }
           // Mark order as paid and set user
           order.payed = true;
           order.user = superId;
@@ -790,6 +802,13 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
           return product;
         });
 
+        // ── Idempotency guard: refuse to touch a terminal order ──
+        if (isTerminal(order.status)) {
+          throw Object.assign(new Error(`Order is already ${order.status}`), {
+            statusCode: 400,
+          });
+        }
+
         // 7. Mark the order as fully paid and archived
         order.payed = true;
         order.status = "archived";
@@ -901,6 +920,13 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
         if (!order) {
           throw Object.assign(new Error("Order not found"), {
             statusCode: 404,
+          });
+        }
+
+        // ── Idempotency guard: refuse to touch a terminal order ──
+        if (isTerminal(order.status)) {
+          throw Object.assign(new Error(`Order is already ${order.status}`), {
+            statusCode: 400,
           });
         }
 
@@ -1125,6 +1151,14 @@ const confirmSelectedProductsPayments = async (req, res) => {
             statusCode: 404,
           });
         }
+
+        // ── Idempotency guard: refuse to touch a terminal order ──
+        if (isTerminal(order.status)) {
+          throw Object.assign(new Error(`Order is already ${order.status}`), {
+            statusCode: 400,
+          });
+        }
+
         // ─── [DEBUG][CONFIRM_PRODUCTS] query result ──────────
         logger.info(
           `[CONFIRM_PRODUCTS] QUERY_RESULT found=${!!order} ` +
@@ -1319,25 +1353,18 @@ const updateOrderStatus = async (req, res) => {
   const { orderId } = req.params;
   const { status: newStatus } = req.body;
   const superClientId = req.superClientId;
-  // Enforce the tenant's flow setting on the server side
-  // Read tenant config for this request
-  const tenant = await User.findById(superClientId).select("statusFlowEnabled");
-  const flowEnabled = tenant?.statusFlowEnabled !== false;
-  // Basic validation
+
   if (!mongoose.Types.ObjectId.isValid(orderId)) {
     return res.status(400).json({ error: "Invalid order ID" });
-  }
-  if (!["pending", "preparing", "completed", "cancelled"].includes(newStatus)) {
-    return res.status(400).json({ error: "Unknown status value" });
   }
 
   const session = await mongoose.startSession();
 
-  // Declare variables outside transaction to access after
   let updatedOrder;
   let warnings = [];
   let insufficientMaterials = [];
   let deficits = [];
+
   try {
     const transactionOptions = {
       readPreference: "primary",
@@ -1346,42 +1373,71 @@ const updateOrderStatus = async (req, res) => {
     };
 
     await session.withTransaction(async () => {
-      // Load order inside transaction
-      // Inside your transaction, modify the findById line:
+      // Tenant + effective flow
+      const tenant = await User.findById(superClientId)
+        .select("statusFlowEnabled orderFlow")
+        .session(session);
+      const tenantFlow = normalizeOrderFlow(tenant);
+
       const order = await Order.findById(orderId)
         .populate("table")
         .populate("products.product")
         .session(session);
+
       if (!order) {
         throw Object.assign(new Error("Order not found"), { statusCode: 404 });
       }
-      if (order.status == "archived") {
-        throw Object.assign(new Error("Status change not allowed"), {
+      if (String(order.superClientId) !== String(superClientId)) {
+        throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+      }
+      if (isTerminal(order.status)) {
+        throw Object.assign(new Error(`Order is already ${order.status}`), {
           statusCode: 400,
         });
       }
 
-      // When the flow is disabled, only allow the workflow on orders that
-      // were created while the flow was ON (i.e. they're already past pending).
-      // A pending/preparing order created pre-toggle must remain progressable.
+      // State-machine validation
+      const check = canTransition(order, newStatus, { tenant });
+      if (!check.ok) {
+        throw Object.assign(new Error(check.reason), { statusCode: 400 });
+      }
+
+      // Cancellation is superClient-only once the order is in "ready" or "delivered".
       if (
-        !flowEnabled &&
-        (newStatus === "pending" || newStatus === "preparing") &&
-        order.status !== "pending" &&
-        order.status !== "preparing"
+        newStatus === "cancelled" &&
+        ["ready", "delivered"].includes(order.status) &&
+        req.role !== "superClient"
       ) {
         throw Object.assign(
-          new Error("Status flow is disabled for this tenant"),
-          { statusCode: 400 },
+          new Error("Only the owner can cancel an order that is already ready"),
+          { statusCode: 403 },
         );
       }
 
-      // Update status
-      order.status = newStatus;
-      order.statusTimestamps[newStatus] = new Date();
+      // Record the handoff actor
+      if (newStatus === "ready" && !order.preparedBy) {
+        order.preparedBy = req.userId || null;
+      }
+      if (newStatus === "delivered") {
+        if (!order.deliveredBy) order.deliveredBy = req.userId || null;
+        if (!order.deliveredAt) order.deliveredAt = new Date();
+      }
 
-      // Decrement inventory BEFORE saving (single save below)
-      if (newStatus === "completed" && !order.inventoryConsumed) {
+      // ── Inventory consumption trigger ──────────────────────
+      //   two-step      → on "archived"      (payment)
+      //   three-step    → on "completed"
+      //   four-step     → on "ready"         (preparing → ready)
+      //   delivery-only → on "delivered"
+      //
+      // Idempotent — decrementForOrder returns skipped:true if already consumed.
+      const shouldConsume =
+        !order.inventoryConsumed &&
+        ((check.flow === "two-step" && newStatus === "archived") ||
+          (check.flow === "three-step" && newStatus === "completed") ||
+          (check.flow === "four-step" && newStatus === "ready") ||
+          (check.flow === "delivery-only" && newStatus === "delivered"));
+
+      if (shouldConsume) {
         const decrementResult = await decrementForOrder(order, session);
 
         if (!decrementResult.skipped) {
@@ -1393,62 +1449,39 @@ const updateOrderStatus = async (req, res) => {
             order.inventoryDeficits.push(...decrementResult.deficits);
           }
         }
-
         warnings = decrementResult.warnings || [];
         insufficientMaterials = decrementResult.insufficientMaterials || [];
         deficits = decrementResult.deficits || [];
       }
 
-      // Single save — persists status + inventoryConsumed + deficits
+      // Apply status
+      order.status = newStatus;
       await order.save({ session });
       updatedOrder = order;
-
-      // On completed, decrement stock — only if not already consumed
-      if (newStatus === "completed" && !order.inventoryConsumed) {
-        const decrementResult = await decrementForOrder(order, session);
-
-        if (!decrementResult.skipped) {
-          order.inventoryConsumed = true;
-          if (
-            Array.isArray(decrementResult.deficits) &&
-            decrementResult.deficits.length > 0
-          ) {
-            order.inventoryDeficits.push(...decrementResult.deficits);
-          }
-        }
-
-        warnings = decrementResult.warnings || [];
-        insufficientMaterials = decrementResult.insufficientMaterials || [];
-        deficits = decrementResult.deficits || [];
-      }
-
-      // Don't return anything - just let the transaction complete
     }, transactionOptions);
-    // Refresh the order to ensure we have latest data
 
+    // Populate for the response / socket
     updatedOrder = await Order.findOne({ _id: orderId, superClientId })
       .populate("table")
       .populate("products.product")
       .session(session);
 
-    // Now we can access our variables that were set during the transaction
-    console.log("Transaction completed successfully");
-
-    // Verify the data
     if (!updatedOrder) {
       throw new Error("Transaction succeeded but no order was processed");
     }
 
-    // Emit over WebSocket
-    req.io.to(superClientId.toString()).emit("orderUpdated", updatedOrder);
+    // Emit to tenant room (notification routing per role is Feature 7)
+    req.io.to(superClientId.toString()).emit("orderUpdated", {
+      ...updatedOrder.toObject(),
+      playSound: true,
+    });
 
-    // Construct response
     const response = {
       message: "Order status updated",
       order: updatedOrder,
+      allowedNext: nextAllowedStatuses(updatedOrder),
     };
 
-    // Add warnings and insufficientMaterials if they exist
     if (Array.isArray(warnings) && warnings.length > 0) {
       response.warnings = warnings;
     }
