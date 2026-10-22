@@ -127,10 +127,16 @@ const createOrder = async (req, res) => {
     }
 
     // Read tenant config once
+    // Read tenant config once
     const tenant = await User.findById(superClientId)
-      .select("statusFlowEnabled")
+      .select("statusFlowEnabled orderFlow")
       .session(session);
-    const flowEnabled = tenant?.statusFlowEnabled !== false;
+
+    // Effective flow: prefer the new field, fall back to legacy flag.
+    const orderFlow =
+      tenant?.orderFlow ||
+      (tenant?.statusFlowEnabled === false ? "two-step" : "three-step");
+    const flowEnabled = orderFlow !== "two-step";
     // 5️⃣ Calculate total price
     const totalPrice = await calculateTotalPrice(products);
 
@@ -163,6 +169,29 @@ const createOrder = async (req, res) => {
     const finalCostSnapshotAt = allSnapshotsPresent ? new Date() : null;
 
     // 6️⃣ Build & save the Order
+    // Initial status depends on the flow:
+    //   two-step      -> "placed"  (formerly "completed" when statusFlowEnabled=false)
+    //   three-step    -> "pending"
+    //   four-step     -> "pending"
+    //   delivery-only -> "placed"
+    //
+    // IMPORTANT: we keep the old "completed" starting status for legacy two-step
+    // tenants until Feature 3 ships the UI selector. That way existing tenants
+    // continue to work unchanged after this commit.
+    let initialStatus = "pending";
+    let initialTimestamps = { pending: new Date() };
+
+    if (orderFlow === "two-step") {
+      initialStatus = "completed";
+      initialTimestamps = { completed: new Date() };
+    } else if (orderFlow === "delivery-only") {
+      initialStatus = "placed";
+      initialTimestamps = { placed: new Date() };
+    } else {
+      initialStatus = "pending";
+      initialTimestamps = { pending: new Date() };
+    }
+
     const orderData = {
       products,
       orderType,
@@ -173,10 +202,9 @@ const createOrder = async (req, res) => {
       user: userId,
       superClientId,
       comment,
-      status: flowEnabled ? "pending" : "completed",
-      statusTimestamps: flowEnabled
-        ? { pending: new Date() }
-        : { completed: new Date() },
+      status: initialStatus,
+      statusTimestamps: initialTimestamps,
+      flowAtCreation: orderFlow,
       orderDate: new Date(),
     };
     if (table) orderData.table = table._id;

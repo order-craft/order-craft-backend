@@ -481,7 +481,7 @@ const getUserById = async (req, res) => {
 
     // Ne sélectionne que les champs non sensibles à renvoyer
     const user = await User.findById(userId).select(
-      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled brandColor",
+      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled brandColor orderFlow customerEditWindow rolePermissions notificationPreferences",
     );
 
     if (!user) {
@@ -496,7 +496,32 @@ const getUserById = async (req, res) => {
     }
 
     logger.info(`Fetched sanitized data for superClient ${userId}`);
-    res.status(200).json(user);
+    // Normalize for legacy tenants that only have statusFlowEnabled
+    const userObj = user.toObject();
+    if (!userObj.orderFlow) {
+      userObj.orderFlow =
+        userObj.statusFlowEnabled === false ? "two-step" : "three-step";
+    }
+    if (!userObj.customerEditWindow) {
+      userObj.customerEditWindow = {
+        enabled: true,
+        minutes: 3,
+        from: "placed",
+      };
+    }
+    if (!userObj.rolePermissions) {
+      userObj.rolePermissions = { canDelivererEditOrders: false };
+    }
+    if (!userObj.notificationPreferences) {
+      userObj.notificationPreferences = {
+        muteOrderNotifications: false,
+        muteSupportNotifications: false,
+        muteStaffNotifications: false,
+      };
+    }
+
+    logger.info(`Fetched sanitized data for superClient ${userId}`);
+    res.status(200).json(userObj);
   } catch (error) {
     logger.error("Error fetching user data:", error);
     res.status(500).json({ message: "Internal server error" });
@@ -512,8 +537,14 @@ const getPlaceDetails = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    const userObj = user.toObject();
+    if (!userObj.orderFlow) {
+      userObj.orderFlow =
+        userObj.statusFlowEnabled === false ? "two-step" : "three-step";
+    }
+
     logger.info(`Fetched data for user ${userId}`);
-    res.status(200).json(user);
+    res.status(200).json(userObj);
   } catch (error) {
     logger.error("Error fetching user data:", error);
     res.status(500).json({ message: "Internal server error" });
@@ -579,6 +610,8 @@ const updateBusinessDetails = async (req, res) => {
       picturePreview,
       statusFlowEnabled,
       brandColor,
+      orderFlow,
+      customerEditWindow,
     } = req.body.placeData;
 
     const userId = req.superClientId;
@@ -614,8 +647,39 @@ const updateBusinessDetails = async (req, res) => {
     }
 
     // Persist the order-flow flag when supplied
-    if (typeof statusFlowEnabled === "boolean") {
+    // Order flow is now the source of truth. statusFlowEnabled is kept in sync
+    // for backward compatibility during the deprecation window.
+    const ALLOWED_FLOWS = [
+      "two-step",
+      "three-step",
+      "four-step",
+      "delivery-only",
+    ];
+
+    if (typeof orderFlow === "string" && ALLOWED_FLOWS.includes(orderFlow)) {
+      updateData.orderFlow = orderFlow;
+      // Keep legacy flag in sync so untouched code paths keep working.
+      updateData.statusFlowEnabled = orderFlow === "two-step" ? false : true;
+    } else if (typeof statusFlowEnabled === "boolean") {
+      // Legacy path: only statusFlowEnabled provided.
       updateData.statusFlowEnabled = statusFlowEnabled;
+      updateData.orderFlow = statusFlowEnabled ? "three-step" : "two-step";
+    }
+
+    // Persist customer edit window when supplied
+    if (customerEditWindow && typeof customerEditWindow === "object") {
+      const allowedFrom = ["placed", "preparing"];
+      const minutes = Number(customerEditWindow.minutes);
+      updateData.customerEditWindow = {
+        enabled:
+          typeof customerEditWindow.enabled === "boolean"
+            ? customerEditWindow.enabled
+            : true,
+        minutes: Number.isFinite(minutes) && minutes >= 0 ? minutes : 3,
+        from: allowedFrom.includes(customerEditWindow.from)
+          ? customerEditWindow.from
+          : "placed",
+      };
     }
     // Persist brand color when a valid hex is supplied
     if (
@@ -648,8 +712,14 @@ const updateBusinessDetails = async (req, res) => {
 
     // Live-notify every open client tab of this tenant
     const notifyPayload = {};
-    if (typeof statusFlowEnabled === "boolean") {
-      notifyPayload.statusFlowEnabled = statusFlowEnabled;
+    if (typeof updateData.statusFlowEnabled === "boolean") {
+      notifyPayload.statusFlowEnabled = updateData.statusFlowEnabled;
+    }
+    if (typeof updateData.orderFlow === "string") {
+      notifyPayload.orderFlow = updateData.orderFlow;
+    }
+    if (updateData.customerEditWindow) {
+      notifyPayload.customerEditWindow = updateData.customerEditWindow;
     }
     if (typeof updateData.brandColor === "string") {
       notifyPayload.brandColor = updateData.brandColor;
@@ -988,6 +1058,12 @@ const qrLogin = async (req, res) => {
         logger.info(
           `[QRLOGIN] SUCCESS tableNumber=${tableData.number} superClient=${superClient} distanceOk=${Math.round(meters)}/${allowed}`,
         );
+        const effectiveOrderFlow =
+          superClientData.orderFlow ||
+          (superClientData.statusFlowEnabled === false
+            ? "two-step"
+            : "three-step");
+
         res.json({
           token: newToken,
           message: "Logged in successfully",
@@ -997,6 +1073,12 @@ const qrLogin = async (req, res) => {
           distance,
           placeLogo,
           statusFlowEnabled: superClientData.statusFlowEnabled !== false,
+          orderFlow: effectiveOrderFlow,
+          customerEditWindow: superClientData.customerEditWindow || {
+            enabled: true,
+            minutes: 3,
+            from: "placed",
+          },
           brandColor: brandColor || "#8B5A2B",
         });
       },
@@ -1019,7 +1101,9 @@ const getClientsBySuperClientId = async (req, res) => {
     const clients = await User.find({
       role: "client",
       superClient: superClientId,
-    });
+    }).select(
+      "fullName email verified staffRole assignedPlanIds assignedTableIds notifications",
+    );
 
     if (!clients.length) {
       logger.warn(`No clients found for SuperClient ID ${superClientId}`);
@@ -1035,7 +1119,15 @@ const getClientsBySuperClientId = async (req, res) => {
 };
 
 const createUser = async (req, res) => {
-  const { fullName, email, password } = req.body;
+  const {
+    fullName,
+    email,
+    password,
+    staffRole,
+    assignedPlanIds,
+    assignedTableIds,
+    notifications,
+  } = req.body;
 
   // Validate request
   const errors = validationResult(req);
@@ -1058,11 +1150,40 @@ const createUser = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
     // Create user object
+    const ALLOWED_STAFF_ROLES = ["preparer", "deliverer", "both"];
+    const safeRole = ALLOWED_STAFF_ROLES.includes(staffRole)
+      ? staffRole
+      : "both";
+    const safePlans = Array.isArray(assignedPlanIds) ? assignedPlanIds : [];
+    const safeTables = Array.isArray(assignedTableIds) ? assignedTableIds : [];
+    const safeNotifications = {
+      newOrder:
+        typeof notifications?.newOrder === "boolean"
+          ? notifications.newOrder
+          : true,
+      support:
+        typeof notifications?.support === "boolean"
+          ? notifications.support
+          : true,
+      orderReady:
+        typeof notifications?.orderReady === "boolean"
+          ? notifications.orderReady
+          : true,
+      orderDelivered:
+        typeof notifications?.orderDelivered === "boolean"
+          ? notifications.orderDelivered
+          : true,
+    };
+
     const newUser = new User({
       fullName,
       email,
       password: hashedPassword,
-      superClient: req.superClientId, // Link the client to the superClient
+      superClient: req.superClientId,
+      staffRole: safeRole,
+      assignedPlanIds: safePlans,
+      assignedTableIds: safeTables,
+      notifications: safeNotifications,
     });
 
     // Save user to the database
@@ -1165,6 +1286,10 @@ const updateUser = async (req, res) => {
       placeName,
       longitude,
       latitude,
+      staffRole,
+      assignedPlanIds,
+      assignedTableIds,
+      notifications,
     } = req.body;
 
     // Load target user and verify ownership before touching anything
@@ -1199,7 +1324,39 @@ const updateUser = async (req, res) => {
     if (latitude && longitude) {
       updateData.placeLocation = { lat: latitude, long: longitude };
     }
-
+    const ALLOWED_STAFF_ROLES = ["preparer", "deliverer", "both"];
+    if (
+      typeof staffRole === "string" &&
+      ALLOWED_STAFF_ROLES.includes(staffRole)
+    ) {
+      updateData.staffRole = staffRole;
+    }
+    if (Array.isArray(assignedPlanIds)) {
+      updateData.assignedPlanIds = assignedPlanIds;
+    }
+    if (Array.isArray(assignedTableIds)) {
+      updateData.assignedTableIds = assignedTableIds;
+    }
+    if (notifications && typeof notifications === "object") {
+      updateData.notifications = {
+        newOrder:
+          typeof notifications.newOrder === "boolean"
+            ? notifications.newOrder
+            : true,
+        support:
+          typeof notifications.support === "boolean"
+            ? notifications.support
+            : true,
+        orderReady:
+          typeof notifications.orderReady === "boolean"
+            ? notifications.orderReady
+            : true,
+        orderDelivered:
+          typeof notifications.orderDelivered === "boolean"
+            ? notifications.orderDelivered
+            : true,
+      };
+    }
     // Password change, if provided
     if (password) {
       const saltRounds = 10;

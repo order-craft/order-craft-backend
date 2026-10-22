@@ -26,7 +26,6 @@ const orderSchema = new Schema({
           required: true,
         },
         productDetails: {
-          // Embedded product details for deleted products
           _id: {
             type: Schema.Types.ObjectId,
             ref: "Product",
@@ -82,16 +81,13 @@ const orderSchema = new Schema({
         },
       },
     ],
-    required: [true, "An order must have at least one product"], // ensures the field is present
+    required: [true, "An order must have at least one product"],
     validate: {
       validator: function (arr) {
-        // array must be non-null and have at least one element
         return Array.isArray(arr) && arr.length > 0;
       },
       message: "An order must contain at least one product.",
     },
-    // alternatively, you can use `minlength: 1` in place of `validate`:
-    // minlength: [1, "An order must contain at least one product"]
   },
   table: {
     type: Schema.Types.ObjectId,
@@ -100,17 +96,66 @@ const orderSchema = new Schema({
       return this.orderType === "dine-in";
     },
   },
+
+  // ─────────────────────────────────────────────────────────────
+  // Status: super-set of every possible status across all flows
+  // ─────────────────────────────────────────────────────────────
   status: {
     type: String,
-    enum: ["pending", "preparing", "completed", "archived", "cancelled"],
+    enum: [
+      "placed",
+      "pending",
+      "preparing",
+      "ready",
+      "delivered",
+      "completed",
+      "archived",
+      "cancelled",
+    ],
     default: "pending",
   },
   statusTimestamps: {
+    placed: { type: Date, default: null },
     pending: { type: Date, default: null },
     preparing: { type: Date, default: null },
+    ready: { type: Date, default: null },
+    delivered: { type: Date, default: null },
     completed: { type: Date, default: null },
     archived: { type: Date, default: null },
   },
+
+  // ─────────────────────────────────────────────────────────────
+  // Flow that was active when the order was created.
+  // Never changes after creation. Legacy orders may have null.
+  // ─────────────────────────────────────────────────────────────
+  flowAtCreation: {
+    type: String,
+    enum: ["two-step", "three-step", "four-step", "delivery-only", null],
+    default: null,
+  },
+
+  // Who performed the operational transitions
+  preparedBy: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  deliveredBy: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  deliveredAt: {
+    type: Date,
+    default: null,
+  },
+
+  // Customer edit window deadline (null = unlimited for staff / legacy)
+  customerEditDeadline: {
+    type: Date,
+    default: null,
+  },
+
   payed: {
     type: Boolean,
     default: false,
@@ -152,7 +197,7 @@ const orderSchema = new Schema({
   },
   superClientId: {
     type: Schema.Types.ObjectId,
-    ref: "User", // Reference to User model for superClient
+    ref: "User",
     required: false,
   },
   comment: {
@@ -185,11 +230,11 @@ const orderSchema = new Schema({
   paymentMethod: {
     type: Schema.Types.ObjectId,
     ref: "PaymentMethod",
-    required: false, // used only when all products are paid using the same method
+    required: false,
   },
 });
 
-// the trigger is used to calculate each time the order spent in each status
+// Keep the existing statusTimestamps pre-save hook
 orderSchema.pre("save", function (next) {
   if (this.isModified("status")) {
     const status = this.status;
@@ -204,29 +249,34 @@ orderSchema.methods.getStatusDurations = function () {
   const durations = {};
   const timestamps = this.statusTimestamps;
 
-  const statuses = ["pending", "preparing", "completed", "archived"];
+  const statuses = [
+    "placed",
+    "pending",
+    "preparing",
+    "ready",
+    "delivered",
+    "completed",
+    "archived",
+  ];
 
-  // Iterate over statuses to calculate durations
   for (let i = 0; i < statuses.length; i++) {
     const currentStatus = statuses[i];
     const nextStatus = statuses[i + 1];
 
     if (timestamps[currentStatus]) {
-      // If there's a next status, calculate duration between current and next status
       if (nextStatus && timestamps[nextStatus]) {
         durations[currentStatus] =
           timestamps[nextStatus] - timestamps[currentStatus];
       } else {
-        // For the last status (no next status), calculate time until now
         durations[currentStatus] = Date.now() - timestamps[currentStatus];
       }
     }
   }
 
-  return durations; // returns durations in milliseconds
+  return durations;
 };
 
-// set products details for recuperation in case of delete
+// Keep the existing productDetails pre-save hook
 orderSchema.pre("save", async function (next) {
   if (this.isModified("products")) {
     for (let i = 0; i < this.products.length; i++) {

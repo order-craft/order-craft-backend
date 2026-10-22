@@ -18,10 +18,21 @@ const verifyClientOrSuperClient = async (req, res, next) => {
     }
 
     if (decoded.role === "client") {
-      const user = await User.findById(decoded.userId);
+      const user = await User.findById(decoded.userId).select(
+        "superClient staffRole assignedPlanIds assignedTableIds notifications",
+      );
       if (user && user.superClient) {
-        req.superClientId = user.superClient; 
+        req.superClientId = user.superClient;
         req.role = decoded.role;
+        req.staffRole = user.staffRole || "both";
+        req.assignedPlanIds = user.assignedPlanIds || [];
+        req.assignedTableIds = user.assignedTableIds || [];
+        req.staffNotifications = user.notifications || {
+          newOrder: true,
+          support: true,
+          orderReady: true,
+          orderDelivered: true,
+        };
 
         return next();
       }
