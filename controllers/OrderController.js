@@ -133,12 +133,13 @@ const createOrder = async (req, res) => {
     }
 
     // Read tenant config once
-    // Read tenant config once
     const tenant = await User.findById(superClientId)
       .select("statusFlowEnabled orderFlow")
       .session(session);
 
-    // Effective flow: prefer the new field, fall back to legacy flag.
+    // `hasExplicitFlow` tells us whether the tenant has already been migrated
+    // (they saved the new Business Details form at least once).
+    const hasExplicitFlow = !!tenant?.orderFlow;
     const orderFlow =
       tenant?.orderFlow ||
       (tenant?.statusFlowEnabled === false ? "two-step" : "three-step");
@@ -188,8 +189,16 @@ const createOrder = async (req, res) => {
     let initialTimestamps = { pending: new Date() };
 
     if (orderFlow === "two-step") {
-      initialStatus = "completed";
-      initialTimestamps = { completed: new Date() };
+      // Migrated tenants use "placed" (new two-step flow).
+      // Legacy tenants (only statusFlowEnabled === false, no orderFlow saved)
+      // keep "completed" so their existing dashboards keep working.
+      if (hasExplicitFlow) {
+        initialStatus = "placed";
+        initialTimestamps = { placed: new Date() };
+      } else {
+        initialStatus = "completed";
+        initialTimestamps = { completed: new Date() };
+      }
     } else if (orderFlow === "delivery-only") {
       initialStatus = "placed";
       initialTimestamps = { placed: new Date() };
