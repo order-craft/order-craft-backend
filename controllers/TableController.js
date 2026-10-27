@@ -149,7 +149,10 @@ const getTablesWithUnpaiedOrders = async (req, res) => {
       superClient: req.superClientId,
     }).populate({
       path: "orders",
-      match: { payed: false }, // Only populate unpaid orders
+      match: {
+        status: { $ne: "archived" },
+        payed: false,
+      },
     });
 
     const tablesWithUnpaidOrders = tables.map((table) => ({

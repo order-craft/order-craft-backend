@@ -13,6 +13,8 @@ const { Support } = require("./models/Support");
 const {
   createSupportRequest,
 } = require("./controllers/SupportRequestController");
+const { emitToRecipients } = require("./Helpers/notificationRecipients");
+
 // Route imports
 const productRoutes = require("./routes/productRoutes");
 const menuRoutes = require("./routes/menuRoutes");
@@ -33,11 +35,12 @@ const recipeRoutes = require("./routes/recipeRoutes");
 
 dotenv.config(); // Load environment variables
 
-// Initialize express app and server
+// ─────────────────────────────────────────────────────────────
+// Express + HTTP + Socket.IO bootstrap
+// ─────────────────────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
 
-// Initialize socket.io with CORS
 const io = socketIo(server, {
   cors: {
     origin: "*", // Update with specific client URL in production
@@ -45,7 +48,9 @@ const io = socketIo(server, {
   },
 });
 
+// ─────────────────────────────────────────────────────────────
 // Middleware
+// ─────────────────────────────────────────────────────────────
 app.use(cors({ origin: "*", methods: "GET,HEAD,PUT,PATCH,POST,DELETE" }));
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -57,7 +62,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Whenever a superClient edits a staff's role/assignments, push an event
+// to that staff so their socket reconnects and joins the new rooms.
+io.emitStaffAssignmentChanged = (staffUserId) => {
+  io.to(`user:${staffUserId}`).emit("staffAssignmentChanged", {
+    userId: String(staffUserId),
+  });
+};
+
+// ─────────────────────────────────────────────────────────────
 // MongoDB connection
+// ─────────────────────────────────────────────────────────────
 const connect = async () => {
   try {
     await mongoose.connect(process.env.MONGO);
@@ -75,13 +90,17 @@ mongoose.connection.on("connected", () => {
   logger.info("MongoDB connected");
 });
 
-// Logging incoming requests
+// ─────────────────────────────────────────────────────────────
+// Request logging
+// ─────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   logger.info(`Incoming request: ${req.method} ${req.url}`);
   next();
 });
 
+// ─────────────────────────────────────────────────────────────
 // Routes
+// ─────────────────────────────────────────────────────────────
 app.use("/auth", userRoutes);
 app.use("/tables", tablesRoutes);
 app.use("/categories", categoryRoutes);
@@ -95,23 +114,29 @@ app.use("/posts", postRoutes);
 app.use("/sup", supportRoutes);
 app.use("/payment-methods", paymentMethodsRoutes);
 
-// By Kadhem
+// Inventory / raw materials / recipes
 app.use("/raw-materials", rawMaterialRoutes);
 app.use("/inventory", inventoryRoutes);
 app.use("/recipes", recipeRoutes);
 
+// ─────────────────────────────────────────────────────────────
+// Socket.IO connection handling
+// ─────────────────────────────────────────────────────────────
 io.on("connection", async (socket) => {
   const token = socket.handshake.auth.token;
-  const requestUrl = socket.handshake.headers.referer; // Get the request URL
+  const requestUrl = socket.handshake.headers.referer;
 
-  // Skip token verification for /auth/login-qr requests
+  // QR-login special case: guest login page before token is issued.
+  // We skip auth here, but they can only join the qr-logins room, which
+  // is not used for any sensitive fan-out.
   if (requestUrl && requestUrl.includes("/auth/login-qr")) {
-    logger.info("QR login connection - skipping token verification");
-    socket.join("qr-logins"); // Optional: join a special room
-    return; // Skip the rest of the auth flow
+    logger.info("[SOCKET] QR login connection - skipping token verification");
+    socket.join("qr-logins");
+    return;
   }
+
   if (!token) {
-    logger.warn("No token provided in socket handshake");
+    logger.warn("[SOCKET] No token provided in socket handshake");
     return socket.disconnect();
   }
 
@@ -122,24 +147,50 @@ io.on("connection", async (socket) => {
     const user = await User.findById(userId);
 
     if (!user) {
-      logger.warn(`User with ID ${userId} not found`);
+      logger.warn(`[SOCKET] User with ID ${userId} not found`);
       return socket.disconnect();
     }
 
-    // Room joining logic remains the same...
+    // ── SuperClient ──────────────────────────────────────────
     if (user.role === "superClient") {
-      // Superclient joins their own room
-      socket.join(user._id.toString());
-      logger.info(`SuperClient ${user.fullName} joined room ${user._id}`);
-    } else if (user.role === "client" && user.superClient) {
-      // Waiters join their superclient's room
-      socket.join(user.superClient.toString());
+      socket.join(user._id.toString()); // legacy room
+      socket.join(`tenant:${user._id}`); // new tenant room
+      socket.join(`user:${user._id}`); // direct room
       logger.info(
-        `Client ${user.fullName} joined superClient room ${user.superClient}`
+        `[SOCKET] SuperClient ${user.fullName} joined tenant:${user._id}`,
       );
     }
 
-    // Modified support request handling
+    // ── Client (waiter) ──────────────────────────────────────
+    else if (user.role === "client" && user.superClient) {
+      const scId = user.superClient.toString();
+
+      socket.join(scId); // legacy room
+      socket.join(`tenant:${scId}`); // new tenant room
+      socket.join(`user:${user._id}`); // direct room
+
+      const role = user.staffRole || "both";
+      if (role === "preparer" || role === "both") {
+        socket.join(`tenant:${scId}:preparers`);
+      }
+      if (role === "deliverer" || role === "both") {
+        socket.join(`tenant:${scId}:deliverers`);
+      }
+      for (const planId of user.assignedPlanIds || []) {
+        socket.join(`tenant:${scId}:plan:${planId}`);
+      }
+      for (const tableId of user.assignedTableIds || []) {
+        socket.join(`tenant:${scId}:table:${tableId}`);
+      }
+
+      logger.info(
+        `[SOCKET] Client ${user.fullName} (${role}) joined tenant:${scId} ` +
+          `+ ${(user.assignedPlanIds || []).length} plans ` +
+          `+ ${(user.assignedTableIds || []).length} tables`,
+      );
+    }
+
+    // ── Support request handling ────────────────────────────
     socket.on("supportRequest", async (data) => {
       console.log("requesting support");
 
@@ -155,17 +206,24 @@ io.on("connection", async (socket) => {
           superClientId,
         });
 
-        // Notify the SuperClient and their room
-        io.to(superClientId.toString()).emit("supportNotification", {
-          tableNumber,
-          requestType,
-          supportId: supportRequest._id, // Include the support request ID
-          createdAt: supportRequest.createdAt,
-          requestTypeName,
+        // Notify the right staff (role- and scope-aware).
+        // `table: null` means we skip scope filtering for support requests
+        // (they are time-sensitive and we prefer over-notify over drop).
+        await emitToRecipients(io, {
+          event: "supportNotification",
+          superClientId,
+          table: null,
+          payload: {
+            tableNumber,
+            requestType,
+            supportId: supportRequest._id,
+            createdAt: supportRequest.createdAt,
+            requestTypeName,
+          },
         });
 
         logger.info(
-          `Support request ${supportRequest._id} created for Table ${tableNumber}`
+          `Support request ${supportRequest._id} created for Table ${tableNumber}`,
         );
       } catch (error) {
         logger.error("Failed to create support request:", error);
@@ -175,9 +233,8 @@ io.on("connection", async (socket) => {
       }
     });
 
-    // Modified call answer handling
     socket.on("supportCallAnswered", async (data) => {
-      const { tableNumber, supportId } = data; // Now expecting supportId
+      const { tableNumber, supportId } = data;
       const superClientId =
         user.role === "client" ? user.superClient : user._id;
 
@@ -190,18 +247,16 @@ io.on("connection", async (socket) => {
       });
 
       try {
-        // Debug log before database operation
         logger.debug(
-          `Attempting to update support request ${supportId} with answered=true`
+          `Attempting to update support request ${supportId} with answered=true`,
         );
 
         const updatedSupport = await Support.findByIdAndUpdate(
           supportId,
           { answered: true },
-          { new: true } // Return the updated document
+          { new: true },
         );
 
-        // Debug log after database operation
         if (updatedSupport) {
           logger.debug(`Successfully updated support request`, {
             supportId,
@@ -216,22 +271,16 @@ io.on("connection", async (socket) => {
           return;
         }
 
-        // Notify the SuperClient and their room
-        logger.debug(
-          `Notifying superClient ${superClientId} about answered call`,
-          {
-            tableNumber,
-            supportId,
-          }
-        );
-
-        io.to(superClientId.toString()).emit("callAnswered", {
+        // `callAnswered` is a broadcast to the tenant so all staff know
+        // this call is being handled (avoids double-answering). Not role-
+        // filtered on purpose.
+        io.to(`tenant:${superClientId}`).emit("callAnswered", {
           tableNumber,
           supportId,
         });
 
         logger.info(
-          `Call answered for Support ${supportId} (Table ${tableNumber})`
+          `Call answered for Support ${supportId} (Table ${tableNumber})`,
         );
       } catch (error) {
         logger.error("Failed to update support request:", {
@@ -248,17 +297,19 @@ io.on("connection", async (socket) => {
       }
     });
 
-    // Disconnect handler remains the same...
+    // ── Disconnect ──────────────────────────────────────────
     socket.on("disconnect", () => {
-      logger.info(`User ${user.fullName} disconnected`);
+      logger.info(`[SOCKET] User ${user.fullName} disconnected`);
     });
   } catch (error) {
-    logger.error("Invalid or expired token:", error);
+    logger.error("[SOCKET] Invalid or expired token:", error);
     return socket.disconnect();
   }
 });
 
+// ─────────────────────────────────────────────────────────────
 // Start the server
+// ─────────────────────────────────────────────────────────────
 const port = process.env.PORT || 5000;
 server.listen(port, () => {
   connect();

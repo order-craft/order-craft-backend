@@ -10,6 +10,11 @@ const { decrementForOrder } = require("../Helpers/functions");
 const { buildProductCostSnapshot } = require("../Helpers/costHelpers");
 const OrderCounter = require("../models/OrderCounter");
 const { startOfDay, endOfDay } = require("date-fns");
+const { emitToRecipients } = require("../Helpers/notificationRecipients");
+const {
+  canPerformTransition,
+  staffInScope,
+} = require("../Helpers/orderAccess");
 const {
   canTransition,
   nextAllowedStatuses,
@@ -39,7 +44,13 @@ const calculateTotalPrice = async (products) => {
     return total + discountedPrice * item.quantity;
   }, 0);
 };
-
+const getStaffContext = (req) => ({
+  role: req.role === "superClient" ? "superClient" : "client",
+  staffRole:
+    req.role === "superClient" ? "superClient" : req.staffRole || "both",
+  assignedPlanIds: req.assignedPlanIds || [],
+  assignedTableIds: req.assignedTableIds || [],
+});
 const calculateTotalPriceCreating = async (products) => {
   const productIds = products.map((item) => item.product);
 
@@ -144,6 +155,7 @@ const createOrder = async (req, res) => {
       tenant?.orderFlow ||
       (tenant?.statusFlowEnabled === false ? "two-step" : "three-step");
     const flowEnabled = orderFlow !== "two-step";
+
     // 5️⃣ Calculate total price
     const totalPrice = await calculateTotalPrice(products);
 
@@ -175,16 +187,7 @@ const createOrder = async (req, res) => {
         : null;
     const finalCostSnapshotAt = allSnapshotsPresent ? new Date() : null;
 
-    // 6️⃣ Build & save the Order
-    // Initial status depends on the flow:
-    //   two-step      -> "placed"  (formerly "completed" when statusFlowEnabled=false)
-    //   three-step    -> "pending"
-    //   four-step     -> "pending"
-    //   delivery-only -> "placed"
-    //
-    // IMPORTANT: we keep the old "completed" starting status for legacy two-step
-    // tenants until Feature 3 ships the UI selector. That way existing tenants
-    // continue to work unchanged after this commit.
+    // 6️⃣ Determine initial status based on flow
     let initialStatus = "pending";
     let initialTimestamps = { pending: new Date() };
 
@@ -259,8 +262,15 @@ const createOrder = async (req, res) => {
       playSound: true,
     };
 
-    // 1️⃣0️⃣ Emit to clients
-    req.io.to(superClientId.toString()).emit("newOrder", payload);
+    // 1️⃣0️⃣ Emit to clients (role- and scope-aware)
+    //      Only preppers (or "both") are notified of new orders by default;
+    //      SuperClient is notified unless they muted order notifications.
+    await emitToRecipients(req.io, {
+      event: "newOrder",
+      superClientId,
+      order: populated,
+      payload,
+    });
 
     return res.status(201).json({
       message: "Order created successfully",
@@ -368,6 +378,7 @@ const updateOrder = async (req, res) => {
     const orderId = req.params.orderId;
     const { products, table, status, payed, comment } = req.body;
     const superClientId = req.superClientId;
+
     if (products && products.length === 0) {
       const deletedOrder = await Order.findOneAndDelete({
         _id: orderId,
@@ -386,8 +397,11 @@ const updateOrder = async (req, res) => {
       });
 
       logger.info(`Order with ID ${orderId} deleted successfully`);
-      // req.io.emit("newOrder", order);
-      req.io.to(superClientId.toString()).emit("newOrder", order); // Emit to specific room
+
+      // Route through emitToRecipients (order was deleted, so use deleteOrder
+      // which is a tenant-wide event by design — every staff needs to
+      // drop it from their list).
+      req.io.to(`tenant:${superClientId}`).emit("deleteOrder", orderId);
 
       return res.status(200).json({ message: "Order deleted successfully" });
     }
@@ -405,7 +419,11 @@ const updateOrder = async (req, res) => {
       { new: true },
     )
       .populate("products.product")
-      .populate("table");
+      .populate({
+        path: "table",
+        populate: { path: "plan", select: "_id name" },
+      });
+
     if (!order) {
       logger.warn(
         `Order with ID ${orderId} not found when attempting to update`,
@@ -413,8 +431,18 @@ const updateOrder = async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
     logger.info(`Order with ID ${orderId} updated successfully`);
-    // req.io.emit("newOrder", order);
-    req.io.to(superClientId.toString()).emit("newOrder", order); // Emit to specific room
+
+    // Route through emitToRecipients
+    await emitToRecipients(req.io, {
+      event: "orderUpdated",
+      superClientId,
+      order,
+      payload: {
+        ...order.toObject(),
+        statusDurations: order.getStatusDurations?.() || {},
+        playSound: true,
+      },
+    });
 
     res.status(200).json({ message: "Order updated successfully", order });
   } catch (error) {
@@ -448,7 +476,7 @@ const deleteOrder = async (req, res) => {
     });
 
     logger.info(`Order with ID ${orderId} deleted successfully`);
-    req.io.to(superClientId.toString()).emit("deleteOrder", order._id); // Emit to specific room
+    req.io.to(`tenant:${superClientId}`).emit("deleteOrder", order._id);
 
     console.log("deleted order id is", order._id);
     res.status(200).json({ message: "Order deleted successfully" });
@@ -582,14 +610,20 @@ const confirmSelectedPayments = async (req, res) => {
       };
 
       await session.withTransaction(async () => {
-        // Find unpaid orders within the transaction
+        // Find unpaid orders within the transaction.
+        // `table` is populated with `plan` so the scope check works.
         const orders = await Order.find({
           _id: { $in: validOrderIds },
           payed: false,
           superClientId,
         })
           .session(session)
-          .populate("superClientId");
+          .populate("superClientId")
+          .populate({
+            path: "table",
+            populate: { path: "plan", select: "_id name" },
+          });
+
         logger.info(
           `[CONFIRM_ALL] QUERY_RESULT validIds=${validOrderIds.length} found=${orders.length} ` +
             `superClientId=${superClientId}`,
@@ -600,8 +634,26 @@ const confirmSelectedPayments = async (req, res) => {
           });
         }
 
+        const staff = getStaffContext(req);
+
         for (const order of orders) {
           console.log(`Processing order ID: ${order._id}`);
+
+          // ── Idempotency guard: skip already-terminal orders ──
+          if (isTerminal(order.status)) {
+            console.log(
+              `[CONFIRM_ALL] Order ${order._id} already ${order.status} — skipping`,
+            );
+            continue;
+          }
+
+          // ── Scope check: staff can only pay orders in their scope ──
+          if (!staffInScope(staff, order)) {
+            console.warn(
+              `[CONFIRM_ALL] Order ${order._id} skipped: staff not in scope`,
+            );
+            continue;
+          }
 
           // Update super client's bill
           if (order.superClientId) {
@@ -634,10 +686,7 @@ const confirmSelectedPayments = async (req, res) => {
           } else if (!hasSomeProductWithPaymentMethod && paymentMethod) {
             order.paymentMethod = paymentMethod;
           }
-          if (isTerminal(order.status)) {
-            // Already archived / cancelled — skip this one.
-            continue;
-          }
+
           // Mark order as paid and set user
           order.payed = true;
           order.user = superId;
@@ -693,9 +742,11 @@ const confirmSelectedPayments = async (req, res) => {
         }
         // Notify connected clients (staff + guests) that these orders changed
         for (const orderId of validOrderIds) {
-          req.io
-            .to(superClientId.toString())
-            .emit("orderUpdated", { _id: orderId });
+          await emitToRecipients(req.io, {
+            event: "orderUpdated",
+            superClientId,
+            payload: { _id: orderId, payed: true },
+          });
         }
       }, transactionOptions);
 
@@ -719,7 +770,7 @@ const confirmSelectedPayments = async (req, res) => {
       if (err.statusCode) {
         return res.status(err.statusCode).json({ message: err.message });
       }
-      throw err; // Re-throw to outer catch for general error handling
+      throw err;
     } finally {
       session.endSession();
     }
@@ -735,6 +786,7 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
   // 1. Extract inputs
   const { orderId, paymentMethod } = req.body;
   const superId = req.userId; // Who is confirming the payment
+  const superClientId = req.superClientId;
 
   try {
     // 2. Basic validation
@@ -765,14 +817,19 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
       };
 
       await session.withTransaction(async () => {
-        // 4. Fetch the unpaid order and populate superClientId within the transaction
+        // 4. Fetch the unpaid order and populate superClientId + table.plan
+        //    (the table.plan populate is what makes staffInScope work).
         const order = await Order.findOne({
           _id: orderId,
           payed: false,
           superClientId,
         })
           .session(session)
-          .populate("superClientId");
+          .populate("superClientId")
+          .populate({
+            path: "table",
+            populate: { path: "plan", select: "_id name" },
+          });
         if (!order) {
           throw Object.assign(new Error("Order not found or already paid"), {
             statusCode: 404,
@@ -781,21 +838,37 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
 
         console.log(`Processing order ${orderId}`);
 
-        // 5. Update the super-client’s bill (4% commission on totalPrice)
-        const superClientId = order.superClientId;
-        if (superClientId) {
-          const bill = await Bill.findOne({ client: superClientId }).session(
-            session,
+        // ── Idempotency guard: refuse to touch a terminal order ──
+        if (isTerminal(order.status)) {
+          throw Object.assign(new Error(`Order is already ${order.status}`), {
+            statusCode: 400,
+          });
+        }
+
+        // ── Scope check: staff can only pay orders in their scope ──
+        const staff = getStaffContext(req);
+        if (!staffInScope(staff, order)) {
+          throw Object.assign(
+            new Error("You are not assigned to this order."),
+            { statusCode: 403 },
           );
+        }
+
+        // 5. Update the super-client’s bill (4% commission on totalPrice)
+        const billSuperClientId = order.superClientId;
+        if (billSuperClientId) {
+          const bill = await Bill.findOne({
+            client: billSuperClientId,
+          }).session(session);
           if (bill) {
             const commission = order.totalPrice * 0.04;
             bill.totalAmount += commission;
             await bill.save({ session });
             console.log(
-              `Updated bill for superClient ${superClientId}. New total: ${bill.totalAmount}`,
+              `Updated bill for superClient ${billSuperClientId}. New total: ${bill.totalAmount}`,
             );
           } else {
-            console.warn(`No bill found for superClient ${superClientId}`);
+            console.warn(`No bill found for superClient ${billSuperClientId}`);
           }
         }
 
@@ -810,13 +883,6 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
           }
           return product;
         });
-
-        // ── Idempotency guard: refuse to touch a terminal order ──
-        if (isTerminal(order.status)) {
-          throw Object.assign(new Error(`Order is already ${order.status}`), {
-            statusCode: 400,
-          });
-        }
 
         // 7. Mark the order as fully paid and archived
         order.payed = true;
@@ -844,10 +910,15 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
 
         // 9. Persist all changes to the order
         await order.save({ session });
-        req.io.to(String(order.superClientId)).emit("orderUpdated", {
-          _id: order._id,
-          payed: true,
-          status: order.status,
+        await emitToRecipients(req.io, {
+          event: "orderUpdated",
+          superClientId,
+          order,
+          payload: {
+            _id: order._id,
+            payed: true,
+            status: order.status,
+          },
         });
         console.log(`Order ${orderId} marked as paid and archived.`);
 
@@ -866,12 +937,15 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
       if (insufficientMaterials.length > 0) {
         response.insufficientMaterials = insufficientMaterials;
       }
+      if (deficits.length > 0) {
+        response.deficits = deficits;
+      }
       return res.status(200).json(response);
     } catch (err) {
       if (err.statusCode) {
         return res.status(err.statusCode).json({ message: err.message });
       }
-      throw err; // Re-throw to outer catch for general error handling
+      throw err;
     } finally {
       session.endSession();
     }
@@ -919,13 +993,18 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
       };
 
       await session.withTransaction(async () => {
-        // Find the order within the transaction
+        // Find the order within the transaction.
+        // `table.plan` is populated so staffInScope works.
         const order = await Order.findOne({
           _id: orderId,
-          superClientId: req.superClientId,
+          superClientId,
         })
           .session(session)
-          .populate("superClientId");
+          .populate("superClientId")
+          .populate({
+            path: "table",
+            populate: { path: "plan", select: "_id name" },
+          });
         if (!order) {
           throw Object.assign(new Error("Order not found"), {
             statusCode: 404,
@@ -937,6 +1016,15 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
           throw Object.assign(new Error(`Order is already ${order.status}`), {
             statusCode: 400,
           });
+        }
+
+        // ── Scope check ──
+        const staff = getStaffContext(req);
+        if (!staffInScope(staff, order)) {
+          throw Object.assign(
+            new Error("You are not assigned to this order."),
+            { statusCode: 403 },
+          );
         }
 
         let totalPaidAmount = 0;
@@ -1059,10 +1147,15 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 
         // Save the updated order
         await order.save({ session });
-        req.io.to(String(order.superClientId)).emit("orderUpdated", {
-          _id: order._id,
-          payed: order.payed,
-          status: order.status,
+        await emitToRecipients(req.io, {
+          event: "orderUpdated",
+          superClientId,
+          order,
+          payload: {
+            _id: order._id,
+            payed: order.payed,
+            status: order.status,
+          },
         });
         updatedOrder = order;
       }, transactionOptions);
@@ -1094,7 +1187,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
       if (err.statusCode) {
         return res.status(err.statusCode).json({ message: err.message });
       }
-      throw err; // Re-throw to outer catch for general error handling
+      throw err;
     } finally {
       session.endSession();
     }
@@ -1109,6 +1202,8 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 const confirmSelectedProductsPayments = async (req, res) => {
   const { orderId, productIds, paymentMethod } = req.body;
   const superId = req.userId;
+  const superClientId = req.superClientId;
+
   logger.info(
     `[CONFIRM_PRODUCTS] ENTER req.userId=${req.userId} req.superClientId=${req.superClientId} ` +
       `role=${req.role} orderId=${orderId} productIdsLen=${productIds?.length} paymentMethod=${paymentMethod}`,
@@ -1147,14 +1242,18 @@ const confirmSelectedProductsPayments = async (req, res) => {
       };
 
       await session.withTransaction(async () => {
-        // Load order within transaction
+        // Load order within transaction.
+        // `table.plan` is populated so staffInScope works.
         const order = await Order.findOne({
           _id: orderId,
-          superClientId: req.superClientId,
+          superClientId,
         })
-
           .session(session)
-          .populate("superClientId");
+          .populate("superClientId")
+          .populate({
+            path: "table",
+            populate: { path: "plan", select: "_id name" },
+          });
         if (!order) {
           throw Object.assign(new Error("Order not found"), {
             statusCode: 404,
@@ -1166,6 +1265,15 @@ const confirmSelectedProductsPayments = async (req, res) => {
           throw Object.assign(new Error(`Order is already ${order.status}`), {
             statusCode: 400,
           });
+        }
+
+        // ── Scope check ──
+        const staff = getStaffContext(req);
+        if (!staffInScope(staff, order)) {
+          throw Object.assign(
+            new Error("You are not assigned to this order."),
+            { statusCode: 403 },
+          );
         }
 
         // ─── [DEBUG][CONFIRM_PRODUCTS] query result ──────────
@@ -1228,7 +1336,6 @@ const confirmSelectedProductsPayments = async (req, res) => {
               );
             }
           }
-          // Decrement inventory
           // Decrement inventory (exactly once per order)
           if (!order.inventoryConsumed) {
             const decrementResult = await decrementForOrder(order, session);
@@ -1253,10 +1360,15 @@ const confirmSelectedProductsPayments = async (req, res) => {
         await order.save({ session });
 
         updatedOrder = order;
-        req.io.to(String(order.superClientId)).emit("orderUpdated", {
-          _id: order._id,
-          payed: order.payed,
-          status: order.status,
+        await emitToRecipients(req.io, {
+          event: "orderUpdated",
+          superClientId,
+          order,
+          payload: {
+            _id: order._id,
+            payed: order.payed,
+            status: order.status,
+          },
         });
         // Archive table orders if all are paid
         const unpaidOrders = await Order.find({
@@ -1389,7 +1501,10 @@ const updateOrderStatus = async (req, res) => {
       const tenantFlow = normalizeOrderFlow(tenant);
 
       const order = await Order.findById(orderId)
-        .populate("table")
+        .populate({
+          path: "table",
+          populate: { path: "plan", select: "_id name" },
+        })
         .populate("products.product")
         .session(session);
 
@@ -1405,13 +1520,28 @@ const updateOrderStatus = async (req, res) => {
         });
       }
 
-      // State-machine validation
+      // ── 1. State machine (can this order legally move?) ────────
       const check = canTransition(order, newStatus, { tenant });
       if (!check.ok) {
         throw Object.assign(new Error(check.reason), { statusCode: 400 });
       }
 
-      // Cancellation is superClient-only once the order is in "ready" or "delivered".
+      // ── 2. Staff scope (is this staff allowed on this table?) ──
+      const staff = getStaffContext(req);
+      const access = canPerformTransition(
+        staff,
+        order,
+        order.status,
+        newStatus,
+        { tenant },
+      );
+      if (!access.ok) {
+        throw Object.assign(new Error(access.reason), { statusCode: 403 });
+      }
+
+      // ── 3. Explicit rule: cancellation of ready/delivered ─────
+      //    only superClient (redundant with TRANSITION_ROLES but gives
+      //    a clearer error message).
       if (
         newStatus === "cancelled" &&
         ["ready", "delivered"].includes(order.status) &&
@@ -1437,8 +1567,6 @@ const updateOrderStatus = async (req, res) => {
       //   three-step    → on "completed"
       //   four-step     → on "ready"         (preparing → ready)
       //   delivery-only → on "delivered"
-      //
-      // Idempotent — decrementForOrder returns skipped:true if already consumed.
       const shouldConsume =
         !order.inventoryConsumed &&
         ((check.flow === "two-step" && newStatus === "archived") ||
@@ -1471,7 +1599,10 @@ const updateOrderStatus = async (req, res) => {
 
     // Populate for the response / socket
     updatedOrder = await Order.findOne({ _id: orderId, superClientId })
-      .populate("table")
+      .populate({
+        path: "table",
+        populate: { path: "plan", select: "_id name" },
+      })
       .populate("products.product")
       .session(session);
 
@@ -1479,10 +1610,51 @@ const updateOrderStatus = async (req, res) => {
       throw new Error("Transaction succeeded but no order was processed");
     }
 
-    // Emit to tenant room (notification routing per role is Feature 7)
-    req.io.to(superClientId.toString()).emit("orderUpdated", {
+    // Emit to the right audience.
+    //   - If the new status is "ready"     → emit "orderReady"
+    //   - If the new status is "delivered" → emit "orderDelivered"
+    //   - Otherwise                        → emit "orderUpdated"
+    //
+    // We still send "orderUpdated" alongside orderReady/orderDelivered for
+    // listeners that rely on the generic event (e.g. the Orders page). The
+    // specific event is only used for the ringtone / banner in delivery staff.
+    const basePayload = {
       ...updatedOrder.toObject(),
-      playSound: true,
+    };
+
+    if (newStatus === "ready") {
+      await emitToRecipients(req.io, {
+        event: "orderReady",
+        superClientId,
+        order: updatedOrder,
+        payload: {
+          orderId: updatedOrder._id,
+          tableNumber: updatedOrder.table?.number || null,
+          planName: updatedOrder.table?.plan?.name || null,
+          itemsCount: updatedOrder.products?.length || 0,
+          status: updatedOrder.status,
+        },
+      });
+    } else if (newStatus === "delivered") {
+      await emitToRecipients(req.io, {
+        event: "orderDelivered",
+        superClientId,
+        order: updatedOrder,
+        payload: {
+          orderId: updatedOrder._id,
+          tableNumber: updatedOrder.table?.number || null,
+          deliveredBy: updatedOrder.deliveredBy || null,
+          deliveredAt: updatedOrder.deliveredAt || null,
+          status: updatedOrder.status,
+        },
+      });
+    }
+
+    await emitToRecipients(req.io, {
+      event: "orderUpdated",
+      superClientId,
+      order: updatedOrder,
+      payload: basePayload,
     });
 
     const response = {

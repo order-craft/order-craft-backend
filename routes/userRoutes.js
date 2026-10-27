@@ -20,6 +20,7 @@ const {
   sendChangePersonalDettailsVerifCode,
   changeSuperClientPD,
   updateBusinessDetails,
+  getMe,
 } = require("../controllers/UserController");
 const verifyToken = require("../middleWares/jerifyToken");
 const verifySuperClient = require("../middleWares/VerifySuperClient");
@@ -65,6 +66,8 @@ router.get(
   verifySuperClient,
   getClientsBySuperClientId,
 );
+// routes/userRoutes.js
+router.get("/me", verifyToken, getMe);
 router.post("/superClient/create-user", verifySuperClient, createUser);
 router.post(
   "/superClient/change-profile",
