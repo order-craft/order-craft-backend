@@ -1428,6 +1428,133 @@ const updateUser = async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 };
+// ─────────────────────────────────────────────────────────────
+// Notification preferences
+// ─────────────────────────────────────────────────────────────
+
+// A staff member updates their own four notification toggles.
+const updateOwnStaffNotifications = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { notifications } = req.body;
+
+    if (!notifications || typeof notifications !== "object") {
+      return res
+        .status(400)
+        .json({ error: "notifications object is required" });
+    }
+
+    const current = await User.findById(userId).select("role notifications");
+    if (!current) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    if (current.role !== "client") {
+      return res
+        .status(403)
+        .json({ message: "This endpoint is for staff users only" });
+    }
+
+    const prev = current.notifications || {};
+    const safe = {
+      newOrder:
+        typeof notifications.newOrder === "boolean"
+          ? notifications.newOrder
+          : (prev.newOrder ?? true),
+      support:
+        typeof notifications.support === "boolean"
+          ? notifications.support
+          : (prev.support ?? true),
+      orderReady:
+        typeof notifications.orderReady === "boolean"
+          ? notifications.orderReady
+          : (prev.orderReady ?? true),
+      orderDelivered:
+        typeof notifications.orderDelivered === "boolean"
+          ? notifications.orderDelivered
+          : (prev.orderDelivered ?? true),
+    };
+
+    const updated = await User.findByIdAndUpdate(
+      userId,
+      { $set: { notifications: safe } },
+      { new: true, select: "notifications" },
+    ).lean();
+
+    logger.info(`Staff ${userId} updated their notification preferences`);
+    return res.status(200).json({
+      message: "Notification preferences updated",
+      notifications: updated?.notifications || safe,
+    });
+  } catch (error) {
+    logger.error("Error updating staff notifications:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// A superClient updates their own three mute toggles.
+const updateOwnerNotificationPreferences = async (req, res) => {
+  try {
+    const userId = req.superClientId;
+    const { notificationPreferences } = req.body;
+
+    if (
+      !notificationPreferences ||
+      typeof notificationPreferences !== "object"
+    ) {
+      return res
+        .status(400)
+        .json({ error: "notificationPreferences object is required" });
+    }
+
+    // Load only what we need — no save() so the required validators on the
+    // other superClient fields are not re-run.
+    const current = await User.findById(userId).select(
+      "role notificationPreferences",
+    );
+    if (!current) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    if (current.role !== "superClient") {
+      return res
+        .status(403)
+        .json({ message: "This endpoint is for superClients only" });
+    }
+
+    const prev = current.notificationPreferences || {};
+    const safe = {
+      muteOrderNotifications:
+        typeof notificationPreferences.muteOrderNotifications === "boolean"
+          ? notificationPreferences.muteOrderNotifications
+          : (prev.muteOrderNotifications ?? false),
+      muteSupportNotifications:
+        typeof notificationPreferences.muteSupportNotifications === "boolean"
+          ? notificationPreferences.muteSupportNotifications
+          : (prev.muteSupportNotifications ?? false),
+      muteStaffNotifications:
+        typeof notificationPreferences.muteStaffNotifications === "boolean"
+          ? notificationPreferences.muteStaffNotifications
+          : (prev.muteStaffNotifications ?? false),
+    };
+
+    // Atomic update — only touches notificationPreferences.
+    // runValidators is NOT set, so required validators on other fields
+    // (contractNumber, percentage, pricingPlan, etc.) are not triggered.
+    const updated = await User.findByIdAndUpdate(
+      userId,
+      { $set: { notificationPreferences: safe } },
+      { new: true, select: "notificationPreferences" },
+    ).lean();
+
+    logger.info(`SuperClient ${userId} updated notification preferences`);
+    return res.status(200).json({
+      message: "Notification preferences updated",
+      notificationPreferences: updated?.notificationPreferences || safe,
+    });
+  } catch (error) {
+    logger.error("Error updating owner notification preferences:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
 
 module.exports = {
   register,
@@ -1453,4 +1580,6 @@ module.exports = {
   sendChangePersonalDettailsVerifCode,
   changeSuperClientPD,
   updateBusinessDetails,
+  updateOwnStaffNotifications,
+  updateOwnerNotificationPreferences,
 };

@@ -21,6 +21,8 @@ const {
   changeSuperClientPD,
   updateBusinessDetails,
   getMe,
+  updateOwnStaffNotifications,
+  updateOwnerNotificationPreferences,
 } = require("../controllers/UserController");
 const verifyToken = require("../middleWares/jerifyToken");
 const verifySuperClient = require("../middleWares/VerifySuperClient");
@@ -65,6 +67,13 @@ router.get(
   "/superClient/getUsers",
   verifySuperClient,
   getClientsBySuperClientId,
+);
+// Notification preferences
+router.post("/staff/notifications", verifyToken, updateOwnStaffNotifications);
+router.post(
+  "/superClient/notification-preferences",
+  verifySuperClient,
+  updateOwnerNotificationPreferences,
 );
 // routes/userRoutes.js
 router.get("/me", verifyToken, getMe);
