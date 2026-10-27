@@ -162,9 +162,150 @@ const canPerformTransition = (staff, order, from, to, opts = {}) => {
 
   return { ok: true };
 };
+/**
+ * Can this actor edit or cancel this order?
+ *
+ * Rules:
+ *   - superClient: always yes (subject to the state machine, checked elsewhere)
+ *   - staff (client):
+ *       - must be in scope (or unrestricted)
+ *       - deliverers need `rolePermissions.canDelivererEditOrders === true`
+ *       - preparers get the same permission as "both" for edit purposes
+ *         (they will rarely see an editable order in practice)
+ *   - guest (req.role === "guest" or "table"):
+ *       - only if the order is in an editable state
+ *       - only if `customerEditDeadline` is set and in the future
+ *       - if `customerEditDeadline` is null (window disabled), the guest is
+ *         allowed ONLY if the order is still in the initial status for its
+ *         flow. Once a staff member has moved it, the guest is locked out.
+ *
+ * @param {object} args
+ * @param {object} args.order      hydrated order (needs status, flowAtCreation,
+ *                                 customerEditDeadline, statusTimestamps)
+ * @param {object} args.staff      { role, staffRole, assignedPlanIds, assignedTableIds }
+ * @param {object} args.tenant     superClient doc (needs customerEditWindow, rolePermissions)
+ * @param {string} args.actorType  "guest" | "staff"
+ * @param {object} [args.now]      injectable clock for tests
+ * @returns {{ ok: boolean, reason?: string, deadline?: Date|null }}
+ */
+const canEditOrder = ({
+  order,
+  staff,
+  tenant,
+  actorType,
+  now = new Date(),
+}) => {
+  if (!order) return { ok: false, reason: "Order not found" };
 
+  // Terminal orders: nobody edits them, ever.
+  if (["archived", "cancelled"].includes(order.status)) {
+    return { ok: false, reason: `Order is already ${order.status}` };
+  }
+
+  const isGuest = actorType === "guest";
+
+  // ── Staff path ────────────────────────────────────────────
+  if (!isGuest) {
+    if (!staff) return { ok: false, reason: "No staff context" };
+
+    // superClient bypasses both scope and role-permission
+    if (staff.role === "superClient") {
+      return { ok: true, deadline: order.customerEditDeadline || null };
+    }
+
+    if (!staffInScope(staff, order)) {
+      return {
+        ok: false,
+        reason: "You are not assigned to this table or plan.",
+      };
+    }
+
+    // Deliverers need the explicit permission from the tenant.
+    const perms = tenant?.rolePermissions || {};
+    const role = staff.staffRole || "both";
+    if (role === "deliverer" && !perms.canDelivererEditOrders) {
+      return {
+        ok: false,
+        reason: "Editing orders is not permitted for your role.",
+      };
+    }
+
+    return { ok: true, deadline: order.customerEditDeadline || null };
+  }
+
+  // ── Guest path ────────────────────────────────────────────
+  // Guests can only edit while the order is in its initial state.
+  const flow = flowForOrder(order, tenant);
+
+  const INITIAL_STATUS = {
+    "two-step": "placed",
+    "three-step": "pending",
+    "four-step": "pending",
+    "delivery-only": "placed",
+  };
+  const expectedInitial = INITIAL_STATUS[flow] || "pending";
+
+  // Legacy two-step orders start at "completed" — treat that as initial too.
+  const isInitial =
+    order.status === expectedInitial ||
+    (flow === "two-step" && order.status === "completed");
+
+  if (!isInitial) {
+    return {
+      ok: false,
+      reason: "Order has already been started by the kitchen.",
+    };
+  }
+
+  const deadline = order.customerEditDeadline
+    ? new Date(order.customerEditDeadline)
+    : null;
+
+  if (deadline && now > deadline) {
+    return {
+      ok: false,
+      reason: "The edit window has expired.",
+      deadline,
+    };
+  }
+
+  // If deadline is null but the tenant enabled the window, we can still
+  // recompute it on the fly. This covers orders created before this
+  // feature shipped. If the tenant disabled the window entirely, allow.
+  if (!deadline) {
+    const cfg = tenant?.customerEditWindow;
+    if (cfg && cfg.enabled) {
+      const anchorField =
+        cfg.from === "preparing"
+          ? order.statusTimestamps?.preparing
+          : order.statusTimestamps?.[expectedInitial] ||
+            order.statusTimestamps?.placed ||
+            order.timestamp ||
+            order.createdAt;
+      if (anchorField) {
+        const computed =
+          new Date(anchorField).getTime() + (Number(cfg.minutes) || 0) * 60000;
+        if (now.getTime() > computed) {
+          return {
+            ok: false,
+            reason: "The edit window has expired.",
+            deadline: new Date(computed),
+          };
+        }
+        return { ok: true, deadline: new Date(computed) };
+      }
+      // If we cannot compute the anchor, be permissive for old data.
+      return { ok: true, deadline: null };
+    }
+    // Window disabled → allow
+    return { ok: true, deadline: null };
+  }
+
+  return { ok: true, deadline };
+};
 module.exports = {
   staffInScope,
   canPerformTransition,
+  canEditOrder,
   TRANSITION_ROLES,
 };

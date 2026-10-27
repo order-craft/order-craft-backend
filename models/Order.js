@@ -149,6 +149,15 @@ const orderSchema = new Schema({
     type: Date,
     default: null,
   },
+  // Customer edit window deadline. Computed at order creation from the
+  // tenant's `customerEditWindow` config. `null` means "unlimited" (legacy
+  // orders, or tenants with the window disabled). Once set, guests cannot
+  // modify or cancel this order after `customerEditDeadline` unless they
+  // are staff.
+  customerEditDeadline: {
+    type: Date,
+    default: null,
+  },
 
   // Customer edit window deadline (null = unlimited for staff / legacy)
   customerEditDeadline: {

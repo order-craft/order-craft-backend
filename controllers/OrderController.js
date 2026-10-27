@@ -14,6 +14,7 @@ const { emitToRecipients } = require("../Helpers/notificationRecipients");
 const {
   canPerformTransition,
   staffInScope,
+  canEditOrder,
 } = require("../Helpers/orderAccess");
 const {
   canTransition,
@@ -145,7 +146,7 @@ const createOrder = async (req, res) => {
 
     // Read tenant config once
     const tenant = await User.findById(superClientId)
-      .select("statusFlowEnabled orderFlow")
+      .select("statusFlowEnabled orderFlow customerEditWindow rolePermissions")
       .session(session);
 
     // `hasExplicitFlow` tells us whether the tenant has already been migrated
@@ -209,7 +210,23 @@ const createOrder = async (req, res) => {
       initialStatus = "pending";
       initialTimestamps = { pending: new Date() };
     }
-
+    // ── Customer edit window ─────────────────────────────
+    // Compute the deadline at order creation so enforcement is O(1) and
+    // immune to config changes mid-order.
+    let customerEditDeadline = null;
+    const editCfg = tenant?.customerEditWindow;
+    if (editCfg && editCfg.enabled) {
+      const minutes = Number(editCfg.minutes) || 0;
+      if (minutes > 0) {
+        if (editCfg.from === "preparing") {
+          // The deadline is computed when the order enters "preparing",
+          // not now. Leave null; the updateOrderStatus handler will set it.
+          customerEditDeadline = null;
+        } else {
+          customerEditDeadline = new Date(Date.now() + minutes * 60000);
+        }
+      }
+    }
     const orderData = {
       products,
       orderType,
@@ -223,8 +240,10 @@ const createOrder = async (req, res) => {
       status: initialStatus,
       statusTimestamps: initialTimestamps,
       flowAtCreation: orderFlow,
+      customerEditDeadline,
       orderDate: new Date(),
     };
+
     if (table) orderData.table = table._id;
     if (orderNumber != null) orderData.orderNumber = orderNumber;
 
@@ -379,33 +398,69 @@ const updateOrder = async (req, res) => {
     const { products, table, status, payed, comment } = req.body;
     const superClientId = req.superClientId;
 
+    // Determine actor type.
+    // `verifyClientOrSuperClientOrTable` sets `req.role` when it validates.
+    // `decodeTableToken` (used on the guest path) sets `req.tableId` and
+    // `req.superClientId` but not `req.role`, so we treat an undefined
+    // `req.role` on a table-token request as "guest".
+    const actorType =
+      req.role === "superClient" || req.role === "client" ? "staff" : "guest";
+
+    // Load tenant config for the enforcement check.
+    const tenant = await User.findById(superClientId).select(
+      "customerEditWindow rolePermissions orderFlow statusFlowEnabled",
+    );
+
+    // Load order to inspect its state.
+    const existing = await Order.findOne({
+      _id: orderId,
+      superClientId,
+    });
+    if (!existing) {
+      logger.warn(
+        `Order with ID ${orderId} not found when attempting to update`,
+      );
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // ── Permission check ─────────────────────────────────
+    const access = canEditOrder({
+      order: existing,
+      staff: actorType === "staff" ? getStaffContext(req) : null,
+      tenant,
+      actorType,
+    });
+    if (!access.ok) {
+      logger.warn(
+        `[UPDATE_ORDER] Blocked orderId=${orderId} actor=${actorType} reason="${access.reason}"`,
+      );
+      return res.status(403).json({
+        error: access.reason,
+        deadline: access.deadline || null,
+      });
+    }
+
+    // ── Deletion branch (unchanged) ──────────────────────
     if (products && products.length === 0) {
       const deletedOrder = await Order.findOneAndDelete({
         _id: orderId,
         superClientId,
       });
       if (!deletedOrder) {
-        logger.warn(
-          `Order with ID ${orderId} not found when attempting to delete`,
-        );
         return res.status(404).json({ error: "Order not found" });
       }
 
-      // Remove the order reference from the table
       await Table.findByIdAndUpdate(deletedOrder.table, {
         $pull: { orders: orderId },
       });
 
       logger.info(`Order with ID ${orderId} deleted successfully`);
-
-      // Route through emitToRecipients (order was deleted, so use deleteOrder
-      // which is a tenant-wide event by design — every staff needs to
-      // drop it from their list).
       req.io.to(`tenant:${superClientId}`).emit("deleteOrder", orderId);
 
       return res.status(200).json({ message: "Order deleted successfully" });
     }
 
+    // ── Update branch ────────────────────────────────────
     const updateData = { table, status, payed, comment };
     if (products) {
       const totalPrice = await calculateTotalPrice(products);
@@ -419,20 +474,18 @@ const updateOrder = async (req, res) => {
       { new: true },
     )
       .populate("products.product")
+      .populate("preparedBy", "fullName")
+      .populate("deliveredBy", "fullName")
       .populate({
         path: "table",
         populate: { path: "plan", select: "_id name" },
       });
 
     if (!order) {
-      logger.warn(
-        `Order with ID ${orderId} not found when attempting to update`,
-      );
       return res.status(404).json({ error: "Order not found" });
     }
     logger.info(`Order with ID ${orderId} updated successfully`);
 
-    // Route through emitToRecipients
     await emitToRecipients(req.io, {
       event: "orderUpdated",
       superClientId,
@@ -444,7 +497,12 @@ const updateOrder = async (req, res) => {
       },
     });
 
-    res.status(200).json({ message: "Order updated successfully", order });
+    res.status(200).json({
+      message: "Order updated successfully",
+      order,
+      // Surface the deadline so the client can display the countdown.
+      customerEditDeadline: order.customerEditDeadline || null,
+    });
   } catch (error) {
     logger.error(
       `Error updating order with ID ${req.params.orderId}: ${error.message}`,
@@ -458,6 +516,16 @@ const deleteOrder = async (req, res) => {
   try {
     const orderId = req.params.orderId;
     const superClientId = req.superClientId;
+
+    // Determine actor type — same convention as updateOrder
+    const actorType =
+      req.role === "superClient" || req.role === "client" ? "staff" : "guest";
+
+    // Load tenant config for the window check
+    const tenant = await User.findById(superClientId).select(
+      "customerEditWindow rolePermissions orderFlow statusFlowEnabled",
+    );
+
     const order = await Order.findOne({
       _id: orderId,
       superClientId,
@@ -467,6 +535,23 @@ const deleteOrder = async (req, res) => {
         `Order with ID ${orderId} not found when attempting to delete`,
       );
       return res.status(404).json({ error: "Order not found" });
+    }
+
+    // ── Permission check ─────────────────────────────────
+    const access = canEditOrder({
+      order,
+      staff: actorType === "staff" ? getStaffContext(req) : null,
+      tenant,
+      actorType,
+    });
+    if (!access.ok) {
+      logger.warn(
+        `[DELETE_ORDER] Blocked orderId=${orderId} actor=${actorType} reason="${access.reason}"`,
+      );
+      return res.status(403).json({
+        error: access.reason,
+        deadline: access.deadline || null,
+      });
     }
 
     await Order.findOneAndDelete({ _id: orderId, superClientId });
@@ -1498,7 +1583,9 @@ const updateOrderStatus = async (req, res) => {
     await session.withTransaction(async () => {
       // Tenant + effective flow
       const tenant = await User.findById(superClientId)
-        .select("statusFlowEnabled orderFlow")
+        .select(
+          "statusFlowEnabled orderFlow customerEditWindow rolePermissions",
+        )
         .session(session);
       const tenantFlow = normalizeOrderFlow(tenant);
 
@@ -1554,7 +1641,29 @@ const updateOrderStatus = async (req, res) => {
           { statusCode: 403 },
         );
       }
+      // If the tenant's edit window starts from "preparing", set the
+      // deadline now that the order is entering preparing.
+      const editCfg = tenant?.customerEditWindow;
+      if (
+        newStatus === "preparing" &&
+        !order.customerEditDeadline &&
+        editCfg?.enabled &&
+        editCfg?.from === "preparing"
+      ) {
+        const minutes = Number(editCfg.minutes) || 0;
+        if (minutes > 0) {
+          order.customerEditDeadline = new Date(Date.now() + minutes * 60000);
+        }
+      }
 
+      // Record the handoff actor
+      if (newStatus === "ready" && !order.preparedBy) {
+        order.preparedBy = req.userId || null;
+      }
+      if (newStatus === "delivered") {
+        if (!order.deliveredBy) order.deliveredBy = req.userId || null;
+        if (!order.deliveredAt) order.deliveredAt = new Date();
+      }
       // Record the handoff actor
       if (newStatus === "ready" && !order.preparedBy) {
         order.preparedBy = req.userId || null;
