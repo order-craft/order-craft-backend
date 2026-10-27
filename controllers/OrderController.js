@@ -1426,11 +1426,13 @@ const getOrdersBySuperClientIdFIFO = async (req, res) => {
       status: { $ne: "archived" },
     })
       .populate("products.product")
+      .populate("preparedBy", "fullName")
+      .populate("deliveredBy", "fullName")
       .populate({
         path: "table",
         populate: {
           path: "plan",
-          select: "name _id", // Include both name and _id
+          select: "name _id",
         },
       })
       .sort({ timestamp: 1 });
