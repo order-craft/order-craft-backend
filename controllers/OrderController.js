@@ -490,6 +490,8 @@ const updateOrder = async (req, res) => {
       event: "orderUpdated",
       superClientId,
       order,
+      actorUserId: req.userId,
+
       payload: {
         ...order.toObject(),
         statusDurations: order.getStatusDurations?.() || {},
@@ -1738,6 +1740,7 @@ const updateOrderStatus = async (req, res) => {
         event: "orderReady",
         superClientId,
         order: updatedOrder,
+        actorUserId: req.userId,
         payload: {
           orderId: updatedOrder._id,
           tableNumber: updatedOrder.table?.number || null,
@@ -1751,6 +1754,7 @@ const updateOrderStatus = async (req, res) => {
         event: "orderDelivered",
         superClientId,
         order: updatedOrder,
+        actorUserId: req.userId,
         payload: {
           orderId: updatedOrder._id,
           tableNumber: updatedOrder.table?.number || null,
@@ -1765,6 +1769,7 @@ const updateOrderStatus = async (req, res) => {
       event: "orderUpdated",
       superClientId,
       order: updatedOrder,
+      actorUserId: req.userId,
       payload: basePayload,
     });
 

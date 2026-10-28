@@ -61,6 +61,7 @@ const superClientPrefs = (superClient) => {
  * @param {object} [args.staff]           array of hydrated client users (for perf)
  * @param {object} [args.order]           hydrated order (table.plan populated)
  * @param {object} [args.table]           hydrated table (plan populated)
+ * @param {string} [args.actorUserId]     user who performed the action — excluded from fan-out
  * @returns {{ rooms: string[], userIds: string[], playSound: boolean }}
  */
 const resolveRecipients = async ({
@@ -70,10 +71,15 @@ const resolveRecipients = async ({
   staff = null,
   order = null,
   table = null,
+  actorUserId = null,
 }) => {
   const rooms = new Set();
   const userIds = new Set();
   let playSound = true;
+
+  // Skip the actor in every branch.
+  const isActor = (id) =>
+    actorUserId != null && String(id) === String(actorUserId);
 
   // Make sure we have the objects we need
   const sc = superClient || (await User.findById(superClientId));
@@ -110,11 +116,9 @@ const resolveRecipients = async ({
   };
 
   if (event === "newOrder") {
-    // Preparers get it. Deliverers get it only if they're also preparers OR
-    // if the tenant is on a flow where "delivery-only" staff aren't going
-    // to be notified about pending orders (they will be notified about ready
-    // ones instead).
+    // Preparers get it.
     for (const s of staffList) {
+      if (isActor(s._id)) continue;
       const role = s.staffRole || "both";
       if (role !== "preparer" && role !== "both") continue;
       if (!staffWants(s, "newOrder")) continue;
@@ -124,15 +128,16 @@ const resolveRecipients = async ({
       userIds.add(String(s._id));
     }
 
-    // SuperClient gets it unless muted
     // SuperClient gets their own per-user room ONLY — not the tenant room.
     // The tenant room is reserved for genuinely tenant-wide events
     // (productUpdated, tenantConfigChanged, deleteOrder). Emitting a
     // role-filtered event to the tenant room reaches every staff member,
     // which defeats the role filter.
     if (!scPrefs.muteOrderNotifications && sc) {
-      rooms.add(userRoom(sc._id));
-      userIds.add(String(sc._id));
+      if (!isActor(sc._id)) {
+        rooms.add(userRoom(sc._id));
+        userIds.add(String(sc._id));
+      }
     } else if (scPrefs.muteOrderNotifications) {
       playSound = false;
     }
@@ -140,6 +145,7 @@ const resolveRecipients = async ({
     // Status changed or payment changed. Preparers and deliverers both care,
     // because the state machine may be advancing on either side.
     for (const s of staffList) {
+      if (isActor(s._id)) continue;
       const role = s.staffRole || "both";
       if (role !== "preparer" && role !== "deliverer" && role !== "both") {
         continue;
@@ -148,20 +154,18 @@ const resolveRecipients = async ({
       rooms.add(userRoom(s._id));
       userIds.add(String(s._id));
     }
-    // SuperClient gets their own per-user room ONLY — not the tenant room.
-    // The tenant room is reserved for genuinely tenant-wide events
-    // (productUpdated, tenantConfigChanged, deleteOrder). Emitting a
-    // role-filtered event to the tenant room reaches every staff member,
-    // which defeats the role filter.
     if (!scPrefs.muteOrderNotifications && sc) {
-      rooms.add(userRoom(sc._id));
-      userIds.add(String(sc._id));
+      if (!isActor(sc._id)) {
+        rooms.add(userRoom(sc._id));
+        userIds.add(String(sc._id));
+      }
     } else if (scPrefs.muteOrderNotifications) {
       playSound = false;
     }
   } else if (event === "orderReady") {
     // Only deliverers care that an order is ready for pickup.
     for (const s of staffList) {
+      if (isActor(s._id)) continue;
       const role = s.staffRole || "both";
       if (role !== "deliverer" && role !== "both") continue;
       if (!staffWants(s, "orderReady")) continue;
@@ -169,21 +173,19 @@ const resolveRecipients = async ({
       rooms.add(userRoom(s._id));
       userIds.add(String(s._id));
     }
-    // SuperClient gets their own per-user room ONLY — not the tenant room.
-    // The tenant room is reserved for genuinely tenant-wide events
-    // (productUpdated, tenantConfigChanged, deleteOrder). Emitting a
-    // role-filtered event to the tenant room reaches every staff member,
-    // which defeats the role filter.
     if (!scPrefs.muteOrderNotifications && sc) {
-      rooms.add(userRoom(sc._id));
-      userIds.add(String(sc._id));
+      if (!isActor(sc._id)) {
+        rooms.add(userRoom(sc._id));
+        userIds.add(String(sc._id));
+      }
     } else if (scPrefs.muteOrderNotifications) {
       playSound = false;
     }
   } else if (event === "orderDelivered") {
-    // Deliverers already know (they did it). SuperClient cares, preparers
-    // might want the "closed" signal, deliverers on other tables can ignore.
+    // Deliverers already know (they did it). Preparers might want the
+    // "closed" signal, deliverers on other tables can ignore.
     for (const s of staffList) {
+      if (isActor(s._id)) continue;
       const role = s.staffRole || "both";
       if (role !== "preparer" && role !== "both") continue;
       if (!staffWants(s, "orderDelivered")) continue;
@@ -191,20 +193,18 @@ const resolveRecipients = async ({
       rooms.add(userRoom(s._id));
       userIds.add(String(s._id));
     }
-    // SuperClient gets their own per-user room ONLY — not the tenant room.
-    // The tenant room is reserved for genuinely tenant-wide events
-    // (productUpdated, tenantConfigChanged, deleteOrder). Emitting a
-    // role-filtered event to the tenant room reaches every staff member,
-    // which defeats the role filter.
     if (!scPrefs.muteOrderNotifications && sc) {
-      rooms.add(userRoom(sc._id));
-      userIds.add(String(sc._id));
+      if (!isActor(sc._id)) {
+        rooms.add(userRoom(sc._id));
+        userIds.add(String(sc._id));
+      }
     } else if (scPrefs.muteOrderNotifications) {
       playSound = false;
     }
   } else if (event === "supportNotification") {
     // Support calls are a floor concern → deliverers only.
     for (const s of staffList) {
+      if (isActor(s._id)) continue;
       const role = s.staffRole || "both";
       if (role !== "deliverer" && role !== "both") continue;
       if (!staffWants(s, "support")) continue;
@@ -213,8 +213,10 @@ const resolveRecipients = async ({
       userIds.add(String(s._id));
     }
     if (!scPrefs.muteSupportNotifications && sc) {
-      rooms.add(userRoom(sc._id));
-      userIds.add(String(sc._id));
+      if (!isActor(sc._id)) {
+        rooms.add(userRoom(sc._id));
+        userIds.add(String(sc._id));
+      }
     } else if (scPrefs.muteSupportNotifications) {
       playSound = false;
     }
@@ -227,6 +229,7 @@ const resolveRecipients = async ({
 
   return { rooms: Array.from(rooms), userIds: Array.from(userIds), playSound };
 };
+
 /**
  * Convenience: resolve recipients and emit in one call.
  *
@@ -248,9 +251,9 @@ const emitToRecipients = async (io, args) => {
 
 module.exports = {
   resolveRecipients,
+  emitToRecipients,
   tenantRoom,
   preparersRoom,
-  emitToRecipients,
   deliverersRoom,
   planRoom,
   tableRoom,
