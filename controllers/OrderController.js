@@ -1,7 +1,7 @@
 const Order = require("../models/Order");
 const Bill = require("../models/Bill");
 const User = require("../models/User");
-
+const PaymentMethod = require("../models/PaymentMethod");
 const Product = require("../models/Product");
 const { Table } = require("../models/Table");
 const logger = require("../logger");
@@ -52,6 +52,19 @@ const getStaffContext = (req) => ({
   assignedPlanIds: req.assignedPlanIds || [],
   assignedTableIds: req.assignedTableIds || [],
 });
+// Fetch the actor's display name once per transition. Falls back to null if
+// the user can't be found — the snapshot fields are optional.
+const resolveActorName = async (userId, session = null) => {
+  if (!userId) return null;
+  try {
+    const q = User.findById(userId).select("fullName").lean();
+    if (session) q.session(session);
+    const user = await q;
+    return user?.fullName || null;
+  } catch {
+    return null;
+  }
+};
 const calculateTotalPriceCreating = async (products) => {
   const productIds = products.map((item) => item.product);
 
@@ -74,7 +87,19 @@ const calculateTotalPriceCreating = async (products) => {
     return total + discountedPrice * item.quantity;
   }, 0);
 };
-
+// Resolve a payment method's display name once, and fall back to null if
+// the id doesn't resolve.
+const resolvePaymentMethodName = async (paymentMethodId, session = null) => {
+  if (!paymentMethodId) return null;
+  try {
+    const q = PaymentMethod.findById(paymentMethodId).select("name").lean();
+    if (session) q.session(session);
+    const pm = await q;
+    return pm?.name || null;
+  } catch {
+    return null;
+  }
+};
 const ALLOWED_ORDER_TYPES = ["dine-in", "to-go", "delivery"];
 
 const createOrder = async (req, res) => {
@@ -332,31 +357,97 @@ const getAllOrders = async (req, res) => {
   }
 };
 
+/**
+ * Fetch non-dine-in (takeaway / delivery) orders for the current tenant.
+ *
+ * Query params:
+ *   range = "today" | "thisWeek" | "all" | "custom"    (default: "today")
+ *   from  = ISO date (used only when range="custom")
+ *   to    = ISO date (used only when range="custom")
+ *
+ * The route name says "today" for backward compatibility with old clients,
+ * but the behaviour is fully driven by `range`.
+ */
 const getNonDineInOrdersToday = async (req, res, next) => {
   try {
-    // Define today's boundaries
-    const start = startOfDay(new Date());
-    const end = endOfDay(new Date());
+    const superClientId = req.superClientId;
+    const { range = "today", from, to } = req.query;
 
-    // Query: exclude dine-in orders, filter by createdAt within today's range
-    const orders = await Order.find({
+    // ── Compute the timestamp window based on the requested range ──
+    let start;
+    let end;
+
+    if (range === "all") {
+      // No filter — every non-dine-in order that ever existed
+      start = null;
+      end = null;
+    } else if (range === "thisWeek") {
+      const now = new Date();
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - now.getDay()); // Sunday
+      weekStart.setHours(0, 0, 0, 0);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6);
+      weekEnd.setHours(23, 59, 59, 999);
+      start = weekStart;
+      end = weekEnd;
+    } else if (range === "custom") {
+      if (!from || !to) {
+        return res.status(400).json({
+          success: false,
+          error: "from and to are required for range=custom",
+        });
+      }
+      const s = new Date(from);
+      const e = new Date(to);
+      if (isNaN(s.getTime()) || isNaN(e.getTime())) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid from/to date" });
+      }
+      s.setHours(0, 0, 0, 0);
+      e.setHours(23, 59, 59, 999);
+      if (s > e) {
+        return res
+          .status(400)
+          .json({ success: false, error: "from must be before to" });
+      }
+      start = s;
+      end = e;
+    } else {
+      // Default: today
+      const now = new Date();
+      start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(now);
+      end.setHours(23, 59, 59, 999);
+    }
+
+    // ── Build the query ──
+    const query = {
+      superClientId,
       orderType: { $ne: "dine-in" },
       orderNumber: { $exists: true },
-      timestamp: { $gte: start, $lte: end },
-    })
+    };
+    if (start && end) {
+      query.timestamp = { $gte: start, $lte: end };
+    }
+
+    const orders = await Order.find(query)
       .populate("products.product")
       .sort({ timestamp: -1 });
 
-    // Respond with results
     return res.status(200).json({
       success: true,
       count: orders.length,
+      range,
+      start: start ? start.toISOString() : null,
+      end: end ? end.toISOString() : null,
       data: orders,
     });
   } catch (error) {
     console.error("Error in getNonDineInOrdersToday:", error);
 
-    // Handle known error types explicitly
     if (error.name === "MongoError") {
       return res
         .status(500)
@@ -367,8 +458,6 @@ const getNonDineInOrdersToday = async (req, res, next) => {
         .status(400)
         .json({ success: false, error: "Invalid parameter provided" });
     }
-
-    // Pass unexpected errors to global error handler
     return next(error);
   }
 };
@@ -461,11 +550,24 @@ const updateOrder = async (req, res) => {
     }
 
     // ── Update branch ────────────────────────────────────
+    // ── Update branch ────────────────────────────────────
     const updateData = { table, status, payed, comment };
     if (products) {
       const totalPrice = await calculateTotalPrice(products);
       updateData.products = products;
       updateData.totalPrice = totalPrice;
+    }
+
+    // If the caller is promoting the status to "ready" or "delivered"
+    // through this route (rare, but possible), snapshot the actor too.
+    if (status === "ready" && !existing.preparedBy) {
+      updateData.preparedBy = req.userId || null;
+      updateData.preparedByName = (await resolveActorName(req.userId)) || null;
+    }
+    if (status === "delivered" && !existing.deliveredBy) {
+      updateData.deliveredBy = req.userId || null;
+      updateData.deliveredByName = (await resolveActorName(req.userId)) || null;
+      if (!existing.deliveredAt) updateData.deliveredAt = new Date();
     }
 
     const order = await Order.findOneAndUpdate(
@@ -678,7 +780,7 @@ const confirmSelectedPayments = async (req, res) => {
       console.warn("No payment method");
       return res.status(400).json({ message: "No payment method is set" });
     }
-
+    const methodName = await resolvePaymentMethodName(paymentMethod);
     // Start a session for the transaction
     const session = await mongoose.startSession();
     let warnings = [];
@@ -768,10 +870,12 @@ const confirmSelectedPayments = async (req, res) => {
             order.products.forEach((product) => {
               if (!product.paymentMethod) {
                 product.paymentMethod = paymentMethod;
+                product.paymentMethodName = methodName;
               }
             });
           } else if (!hasSomeProductWithPaymentMethod && paymentMethod) {
             order.paymentMethod = paymentMethod;
+            order.paymentMethodName = methodName;
           }
 
           // Mark order as paid and set user
@@ -889,6 +993,7 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
       console.warn("No payment method provided");
       return res.status(400).json({ message: "No payment method provided" });
     }
+    const methodName = await resolvePaymentMethodName(paymentMethod);
 
     // 3. Start a session for the transaction
     const session = await mongoose.startSession();
@@ -966,6 +1071,7 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
             product.payedQuantity = product.quantity;
             if (!product.paymentMethod) {
               product.paymentMethod = paymentMethod;
+              product.paymentMethodName = methodName;
             }
           }
           return product;
@@ -975,7 +1081,10 @@ const confirmNotDineinSelectedOrder = async (req, res) => {
         order.payed = true;
         order.status = "archived";
         order.user = superId;
-
+        if (!order.paymentMethod) {
+          order.paymentMethod = paymentMethod;
+          order.paymentMethodName = methodName;
+        }
         // 8. Decrement inventory (exactly once per order)
         if (!order.inventoryConsumed) {
           const decrementResult = await decrementForOrder(order, session);
@@ -1065,7 +1174,7 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
       console.warn("No payment method");
       return res.status(400).json({ message: "No payment method is set" });
     }
-
+    const methodName = await resolvePaymentMethodName(paymentMethod);
     // Start a session for the transaction
     const session = await mongoose.startSession();
     let updatedOrder;
@@ -1138,10 +1247,12 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
               product.paymentSplits.push({
                 quantity: quantityToPay,
                 paymentMethod: paymentMethod,
+                paymentMethodName: methodName,
                 paidAt: new Date(),
               });
 
               product.paymentMethod = paymentMethod;
+              product.paymentMethodName = methodName;
 
               totalPaidAmount += quantityToPay * product.productDetails.price;
 
@@ -1193,6 +1304,10 @@ const confirmSelectedNotDineinProductsPayments = async (req, res) => {
 
         if (allProductsPaid) {
           order.payed = true;
+          if (!order.paymentMethod) {
+            order.paymentMethod = paymentMethod;
+            order.paymentMethodName = methodName;
+          }
           order.status = "archived";
           order.user = superID;
 
@@ -1313,7 +1428,7 @@ const confirmSelectedProductsPayments = async (req, res) => {
       console.warn("No payment method");
       return res.status(400).json({ message: "No payment method is set" });
     }
-
+    const methodName = await resolvePaymentMethodName(paymentMethod);
     // Initialize session and variables
     const session = await mongoose.startSession();
     let updatedOrder;
@@ -1390,10 +1505,12 @@ const confirmSelectedProductsPayments = async (req, res) => {
               item.paymentSplits.push({
                 quantity: quantityToPay,
                 paymentMethod: paymentMethod,
+                paymentMethodName: methodName,
                 paidAt: new Date(),
               });
 
               item.paymentMethod = paymentMethod;
+              item.paymentMethodName = methodName;
 
               totalPaidAmount += quantityToPay * item.productDetails.price;
             }
@@ -1408,6 +1525,10 @@ const confirmSelectedProductsPayments = async (req, res) => {
 
         if (allProductsPaid) {
           order.payed = true;
+          if (!order.paymentMethod) {
+            order.paymentMethod = paymentMethod;
+            order.paymentMethodName = methodName;
+          }
           // Update super client's bill
           if (order.superClientId) {
             const bill = await Bill.findOne({
@@ -1659,11 +1780,21 @@ const updateOrderStatus = async (req, res) => {
       }
 
       // Record the handoff actor
+      // Record the handoff actor + a name snapshot.
+      // The snapshot is what future reports read, so it must be set at the
+      // same time as the ObjectId reference. If the user is later deleted
+      // or renamed, the snapshot survives.
       if (newStatus === "ready" && !order.preparedBy) {
         order.preparedBy = req.userId || null;
+        order.preparedByName =
+          (await resolveActorName(req.userId, session)) || null;
       }
       if (newStatus === "delivered") {
-        if (!order.deliveredBy) order.deliveredBy = req.userId || null;
+        if (!order.deliveredBy) {
+          order.deliveredBy = req.userId || null;
+          order.deliveredByName =
+            (await resolveActorName(req.userId, session)) || null;
+        }
         if (!order.deliveredAt) order.deliveredAt = new Date();
       }
       // Record the handoff actor

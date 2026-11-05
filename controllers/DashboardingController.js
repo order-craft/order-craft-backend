@@ -1,6 +1,21 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const User = require("../models/User");
+const Inventory = require("../models/Inventory");
+
+// Resolve a payment-method name from the best available source, in order:
+//   1. The snapshot stored on the order/line/split (survives deletion)
+//   2. The populated PaymentMethod document (if it still exists)
+//   3. A clear fallback string ("Unknown")
+const getMethodName = (order, lineOrSplit = null) => {
+  if (lineOrSplit) {
+    if (lineOrSplit.paymentMethodName) return lineOrSplit.paymentMethodName;
+    if (lineOrSplit.paymentMethod?.name) return lineOrSplit.paymentMethod.name;
+  }
+  if (order.paymentMethodName) return order.paymentMethodName;
+  if (order.paymentMethod?.name) return order.paymentMethod.name;
+  return "Unknown";
+};
 const getDailyRevenue = async (req, res) => {
   const superClientId = req.superClientId;
 
@@ -41,8 +56,8 @@ const getDailyRevenue = async (req, res) => {
     for (const order of orders) {
       totalRevenue += order.totalPrice;
 
-      if (order.paymentMethod) {
-        const methodName = order.paymentMethod.name;
+      if (order.paymentMethod || order.paymentMethodName) {
+        const methodName = getMethodName(order);
         revenueByPaymentMethod[methodName] =
           (revenueByPaymentMethod[methodName] || 0) + order.totalPrice;
       } else {
@@ -59,15 +74,15 @@ const getDailyRevenue = async (req, res) => {
                   {
                     quantity: product.quantity,
                     paymentMethod: product.paymentMethod ?? order.paymentMethod,
+                    paymentMethodName:
+                      product.paymentMethodName ??
+                      order.paymentMethodName ??
+                      null,
                   },
                 ];
 
           for (const split of splits) {
-            const methodName =
-              split.paymentMethod?.name ??
-              product.paymentMethod?.name ??
-              order.paymentMethod?.name ??
-              "unknown";
+            const methodName = getMethodName(order, split);
             const revenue = finalUnitPrice * (split.quantity || 0);
             revenueByPaymentMethod[methodName] =
               (revenueByPaymentMethod[methodName] || 0) + revenue;
@@ -128,7 +143,7 @@ const getMonthlyRevenue = async (req, res) => {
 
       if (!revenueByDay[day]) revenueByDay[day] = 0;
 
-      if (order.paymentMethod) {
+      if (order.paymentMethod || order.paymentMethodName) {
         // Whole order paid with a single method (order-level)
         let orderRevenue = 0;
 
@@ -141,7 +156,7 @@ const getMonthlyRevenue = async (req, res) => {
           orderRevenue += item.quantity * priceAfterDiscount;
         }
 
-        const methodName = order.paymentMethod.name || "Unknown";
+        const methodName = getMethodName(order);
         revenueByPaymentMethod[methodName] =
           (revenueByPaymentMethod[methodName] || 0) + orderRevenue;
 
@@ -163,14 +178,13 @@ const getMonthlyRevenue = async (req, res) => {
                   {
                     quantity: item.quantity,
                     paymentMethod: item.paymentMethod,
+                    paymentMethodName:
+                      item.paymentMethodName ?? order.paymentMethodName ?? null,
                   },
                 ];
 
           for (const split of splits) {
-            const method =
-              split.paymentMethod?.name ||
-              item.paymentMethod?.name ||
-              "Unknown";
+            const method = getMethodName(order, split);
             const productRevenue = (split.quantity || 0) * priceAfterDiscount;
 
             revenueByPaymentMethod[method] =
@@ -349,7 +363,7 @@ const getWeeklyRevenue = async (req, res) => {
         dailyRevenue[orderDate] = 0;
       }
 
-      if (order.paymentMethod) {
+      if (order.paymentMethod || order.paymentMethodName) {
         // Single payment method for entire order
         let orderRevenue = 0;
 
@@ -362,7 +376,7 @@ const getWeeklyRevenue = async (req, res) => {
           orderRevenue += item.quantity * priceAfterDiscount;
         }
 
-        const methodName = order.paymentMethod.name || "Unknown";
+        const methodName = getMethodName(order);
 
         revenueByPaymentMethod[methodName] =
           (revenueByPaymentMethod[methodName] || 0) + orderRevenue;
@@ -385,14 +399,13 @@ const getWeeklyRevenue = async (req, res) => {
                   {
                     quantity: item.quantity,
                     paymentMethod: item.paymentMethod,
+                    paymentMethodName:
+                      item.paymentMethodName ?? order.paymentMethodName ?? null,
                   },
                 ];
 
           for (const split of splits) {
-            const method =
-              split.paymentMethod?.name ||
-              item.paymentMethod?.name ||
-              "Unknown";
+            const method = getMethodName(order, split);
             const productRevenue = (split.quantity || 0) * priceAfterDiscount;
 
             revenueByPaymentMethod[method] =
@@ -490,7 +503,7 @@ const getRevenueBetweenDates = async (req, res) => {
         revenue[key] = 0;
       }
 
-      if (order.paymentMethod) {
+      if (order.paymentMethod || order.paymentMethodName) {
         let orderRevenue = 0;
         for (const item of order.products) {
           const product = item.product;
@@ -501,7 +514,7 @@ const getRevenueBetweenDates = async (req, res) => {
           orderRevenue += item.quantity * priceAfterDiscount;
         }
 
-        const methodName = order.paymentMethod.name || "Unknown";
+        const methodName = getMethodName(order);
         revenueByPaymentMethod[methodName] =
           (revenueByPaymentMethod[methodName] || 0) + orderRevenue;
 
@@ -521,14 +534,13 @@ const getRevenueBetweenDates = async (req, res) => {
                   {
                     quantity: item.quantity,
                     paymentMethod: item.paymentMethod,
+                    paymentMethodName:
+                      item.paymentMethodName ?? order.paymentMethodName ?? null,
                   },
                 ];
 
           for (const split of splits) {
-            const methodName =
-              split.paymentMethod?.name ||
-              item.paymentMethod?.name ||
-              "Unknown";
+            const methodName = getMethodName(order, split);
             const productRevenue = (split.quantity || 0) * priceAfterDiscount;
 
             revenueByPaymentMethod[methodName] =
@@ -629,59 +641,114 @@ const getRevenueByWaiterAndPeriod = async (req, res) => {
   const { clientId, startDate, endDate } = req.body;
   const superClientId = req.superClientId;
 
-  // Default to the current month if no dates are provided
-  const defaultEndDate = new Date();
-  const defaultStartDate = new Date(defaultEndDate);
-  defaultStartDate.setDate(1); // Start of the current month
+  const defaultEnd = new Date();
+  const defaultStart = new Date(defaultEnd);
+  defaultStart.setDate(1);
 
-  const queryStartDate = startDate ? new Date(startDate) : defaultStartDate;
-  const queryEndDate = endDate ? new Date(endDate) : defaultEndDate;
+  const queryStartDate = startDate ? new Date(startDate) : defaultStart;
+  const queryEndDate = endDate ? new Date(endDate) : defaultEnd;
 
   try {
-    // Build the query
     const query = {
       superClientId,
       status: "archived",
       timestamp: { $gte: queryStartDate, $lte: queryEndDate },
     };
+    if (clientId) query.user = clientId;
 
-    // Add clientId to the query if provided
-    if (clientId) {
-      query.user = clientId;
+    const orders = await Order.find(query).lean();
+
+    // Collect ids
+    const staffIds = new Set();
+    for (const o of orders) {
+      if (o.user) staffIds.add(String(o.user));
+      if (o.preparedBy) staffIds.add(String(o.preparedBy));
+      if (o.deliveredBy) staffIds.add(String(o.deliveredBy));
     }
 
-    // Find orders matching the query
-    const orders = await Order.find(query).populate("user", "fullName");
+    const users = await User.find({
+      _id: { $in: Array.from(staffIds) },
+    })
+      .select("_id fullName staffRole")
+      .lean();
+    const userById = new Map(users.map((u) => [String(u._id), u]));
 
-    // Calculate revenue
-    const revenue = orders.reduce((result, order) => {
-      const clientId = order.user?._id;
-      const clientName = order.user?.fullName;
-
-      // Initialize if not already set
-      if (!result[clientId]) {
-        result[clientId] = {
-          name: clientName,
+    const buckets = new Map();
+    const ensure = (id) => {
+      if (!buckets.has(id)) {
+        buckets.set(id, {
+          clientId: id,
+          name: userById.get(id)?.fullName || "Unknown",
+          role: userById.get(id)?.staffRole || null,
+          isDeleted: !userById.has(id),
           totalRevenue: 0,
-        };
+          preparedCount: 0,
+          preparedRevenue: 0,
+          deliveredCount: 0,
+          deliveredRevenue: 0,
+          snapshotNames: { prepared: null, delivered: null },
+        });
+      }
+      return buckets.get(id);
+    };
+
+    for (const o of orders) {
+      const rev = Number(o.totalPrice) || 0;
+
+      // Order-level revenue goes to the waiter who took the order (o.user).
+      if (o.user) {
+        const b = ensure(String(o.user));
+        b.totalRevenue += rev;
       }
 
-      // Add the order's totalPrice to the client's total revenue
-      result[clientId].totalRevenue += order.totalPrice;
-      return result;
-    }, {});
+      if (o.preparedBy) {
+        const b = ensure(String(o.preparedBy));
+        b.preparedCount += 1;
+        b.preparedRevenue += rev;
+        if (!b.snapshotNames.prepared && o.preparedByName) {
+          b.snapshotNames.prepared = o.preparedByName;
+        }
+      }
 
-    // Format the response
-    const formattedRevenue = Object.entries(revenue).map(
-      ([clientId, { name, totalRevenue }]) => ({
-        clientId,
+      if (o.deliveredBy) {
+        const b = ensure(String(o.deliveredBy));
+        b.deliveredCount += 1;
+        b.deliveredRevenue += rev;
+        if (!b.snapshotNames.delivered && o.deliveredByName) {
+          b.snapshotNames.delivered = o.deliveredByName;
+        }
+      }
+    }
+
+    // If a filter by clientId was applied, only return that client.
+    if (clientId && !buckets.has(String(clientId))) {
+      return res.status(200).json([]);
+    }
+
+    const formatted = Array.from(buckets.values()).map((b) => {
+      const liveName = userById.get(b.clientId)?.fullName;
+      const name =
+        liveName ||
+        b.snapshotNames.prepared ||
+        b.snapshotNames.delivered ||
+        (b.isDeleted ? "Deleted staff" : "Unknown");
+      return {
+        clientId: b.clientId,
         clientName: name,
-        totalRevenue,
-      }),
-    );
+        role: b.role,
+        isDeleted: b.isDeleted,
+        totalRevenue: parseFloat(b.totalRevenue.toFixed(2)),
+        preparedCount: b.preparedCount,
+        preparedRevenue: parseFloat(b.preparedRevenue.toFixed(2)),
+        deliveredCount: b.deliveredCount,
+        deliveredRevenue: parseFloat(b.deliveredRevenue.toFixed(2)),
+      };
+    });
 
-    res.status(200).json(formattedRevenue);
+    formatted.sort((a, b) => b.totalRevenue - a.totalRevenue);
+    res.status(200).json(formatted);
   } catch (error) {
+    console.error("Error in getRevenueByWaiterAndPeriod:", error);
     res.status(500).json({
       message: "Failed to retrieve revenue by waiter and period",
       error: error.message,
@@ -691,46 +758,94 @@ const getRevenueByWaiterAndPeriod = async (req, res) => {
 
 // This controller will fetch the daily revenue for each waiter (client) associated with a specific owner (superClient).
 const getDailyRevenuePerWaiter = async (req, res) => {
-  const superClientId = req.superClientId; // Assuming this comes from authentication
-  const { date } = req.body; // Date for which revenue is requested
+  const superClientId = req.superClientId;
+  const { date } = req.body;
 
-  // Default to today's date if no date is provided
   const queryDate = date ? new Date(date) : new Date();
 
   try {
-    // Find orders for the specified date and superClientId
     const orders = await Order.find({
       superClientId,
       status: "archived",
       timestamp: {
-        $gte: new Date(queryDate.setHours(0, 0, 0, 0)), // Start of the day
-        $lte: new Date(queryDate.setHours(23, 59, 59, 999)), // End of the day
+        $gte: new Date(queryDate.setHours(0, 0, 0, 0)),
+        $lte: new Date(queryDate.setHours(23, 59, 59, 999)),
       },
-    }).populate("user", "fullName"); // Populate waiter details
+    }).lean();
 
-    // Calculate revenue per waiter
-    const revenuePerWaiter = orders.reduce((result, order) => {
-      const waiterId = order.user?._id;
-      const waiterName = order.user?.fullName;
+    const staffIds = new Set();
+    for (const o of orders) {
+      if (o.user) staffIds.add(String(o.user));
+      if (o.preparedBy) staffIds.add(String(o.preparedBy));
+      if (o.deliveredBy) staffIds.add(String(o.deliveredBy));
+    }
+    const users = await User.find({
+      _id: { $in: Array.from(staffIds) },
+    })
+      .select("_id fullName staffRole")
+      .lean();
+    const userById = new Map(users.map((u) => [String(u._id), u]));
 
-      if (!result[waiterId]) {
-        result[waiterId] = {
-          name: waiterName,
+    const buckets = new Map();
+    const ensure = (id) => {
+      if (!buckets.has(id)) {
+        buckets.set(id, {
+          staffId: id,
           totalRevenue: 0,
-        };
+          preparedCount: 0,
+          preparedRevenue: 0,
+          deliveredCount: 0,
+          deliveredRevenue: 0,
+          snapshotNames: { prepared: null, delivered: null },
+        });
       }
+      return buckets.get(id);
+    };
 
-      result[waiterId].totalRevenue += order.totalPrice;
-      return result;
-    }, {});
+    for (const o of orders) {
+      const rev = Number(o.totalPrice) || 0;
 
-    // Format the response
-    const formattedRevenue = Object.values(revenuePerWaiter).map((waiter) => ({
-      name: waiter.name,
-      totalRevenue: waiter.totalRevenue,
-    }));
+      if (o.user) ensure(String(o.user)).totalRevenue += rev;
+      if (o.preparedBy) {
+        const b = ensure(String(o.preparedBy));
+        b.preparedCount += 1;
+        b.preparedRevenue += rev;
+        if (!b.snapshotNames.prepared && o.preparedByName) {
+          b.snapshotNames.prepared = o.preparedByName;
+        }
+      }
+      if (o.deliveredBy) {
+        const b = ensure(String(o.deliveredBy));
+        b.deliveredCount += 1;
+        b.deliveredRevenue += rev;
+        if (!b.snapshotNames.delivered && o.deliveredByName) {
+          b.snapshotNames.delivered = o.deliveredByName;
+        }
+      }
+    }
 
-    res.status(200).json(formattedRevenue);
+    const formatted = Array.from(buckets.values()).map((b) => {
+      const live = userById.get(b.staffId);
+      const name =
+        live?.fullName ||
+        b.snapshotNames.prepared ||
+        b.snapshotNames.delivered ||
+        (live ? "Unknown" : "Deleted staff");
+      return {
+        staffId: b.staffId,
+        name,
+        role: live?.staffRole || null,
+        isDeleted: !live,
+        totalRevenue: parseFloat(b.totalRevenue.toFixed(2)),
+        preparedCount: b.preparedCount,
+        preparedRevenue: parseFloat(b.preparedRevenue.toFixed(2)),
+        deliveredCount: b.deliveredCount,
+        deliveredRevenue: parseFloat(b.deliveredRevenue.toFixed(2)),
+      };
+    });
+
+    formatted.sort((a, b) => b.totalRevenue - a.totalRevenue);
+    res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({
       message: "Failed to retrieve daily revenue per waiter",
@@ -1393,136 +1508,179 @@ const getRevenueByProductForCurrentWeek = async (req, res) => {
   }
 };
 
+/**
+ * Average processing time per flow.
+ *
+ * Body: { startDate?, endDate? }
+ * Defaults: last 7 days.
+ *
+ * Response shape varies by tenant flow:
+ *   two-step      → { flow: "two-step", message: "Status flow is disabled..." }
+ *   three-step    → { flow: "three-step",
+ *                     pendingToPreparing: {...}, preparingToCompleted: {...} }
+ *   four-step     → { flow: "four-step",
+ *                     pendingToPreparing: {...},
+ *                     preparingToReady: {...},
+ *                     readyToDelivered: {...},
+ *                     pendingToDelivered: {...} }
+ *   delivery-only → { flow: "delivery-only", placedToDelivered: {...} }
+ *
+ * Each metric is either null (no valid data) or:
+ *   { avg, min, max, count }  in minutes
+ */
 const getAverageProcessingTime = async (req, res) => {
-  const { startDate, endDate } = req.body;
+  const { startDate, endDate } = req.body || {};
   const superClientId = req.superClientId;
-  const tenant = await User.findById(superClientId).select("statusFlowEnabled");
-  if (tenant && tenant.statusFlowEnabled === false) {
-    return res.status(200).json({
-      statusFlowDisabled: true,
-      message: "Status flow is disabled — processing times are not tracked.",
-    });
-  }
-  // Set default dates if not provided
-  const defaultEndDate = new Date();
-  const defaultStartDate = new Date();
-  defaultStartDate.setDate(defaultEndDate.getDate() - 7);
 
-  const queryStartDate = startDate ? new Date(startDate) : defaultStartDate;
-  const queryEndDate = endDate ? new Date(endDate) : defaultEndDate;
+  const defaultEnd = new Date();
+  const defaultStart = new Date();
+  defaultStart.setDate(defaultEnd.getDate() - 7);
+
+  const start = startDate ? new Date(startDate) : defaultStart;
+  const end = endDate ? new Date(endDate) : defaultEnd;
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    return res.status(400).json({ message: "Invalid date format" });
+  }
 
   try {
-    // Query orders within date range
+    // Load tenant to know which flow is active
+    const tenant = await User.findById(superClientId).select(
+      "orderFlow statusFlowEnabled",
+    );
+    const flow =
+      tenant?.orderFlow ||
+      (tenant?.statusFlowEnabled === false ? "two-step" : "three-step");
+
+    // Fetch orders in range, any non-terminal status history counts
     const orders = await Order.find({
-      timestamp: { $gte: queryStartDate, $lte: queryEndDate },
-      status: { $in: ["pending", "preparing", "completed"] },
-      superClientId: superClientId,
-    }).sort({ timestamp: 1 });
+      superClientId,
+      timestamp: { $gte: start, $lte: end },
+      status: {
+        $in: [
+          "pending",
+          "preparing",
+          "ready",
+          "delivered",
+          "completed",
+          "archived",
+        ],
+      },
+    })
+      .select("status statusTimestamps")
+      .lean();
 
-    let pendingToPreparingDurations = [];
-    let preparingToCompletedDurations = [];
-    let skippedOrders = 0;
+    const range = {
+      startDate: start.toISOString().split("T")[0],
+      endDate: end.toISOString().split("T")[0],
+    };
 
-    orders.forEach((order) => {
-      const statusDurations = order.getStatusDurations();
-
-      // Validate and calculate pending → preparing duration
-      if (statusDurations.pending && statusDurations.preparing) {
-        const duration = statusDurations.preparing - statusDurations.pending;
-        if (duration > 0) {
-          pendingToPreparingDurations.push(duration);
-        } else {
-          skippedOrders++;
-          console.warn(
-            `Skipped order ${order._id}: Invalid pending→preparing duration (${duration}ms)`,
-          );
-        }
-      }
-
-      // Validate and calculate preparing → completed duration
-      if (statusDurations.preparing && statusDurations.completed) {
-        const duration = statusDurations.completed - statusDurations.preparing;
-        if (duration > 0) {
-          preparingToCompletedDurations.push(duration);
-        } else {
-          skippedOrders++;
-          console.warn(
-            `Skipped order ${order._id}: Invalid preparing→completed duration (${duration}ms)`,
-          );
-        }
-      }
-    });
-
-    // Enhanced stats calculation with validation
-    const calculateStats = (durations, stageName) => {
-      if (durations.length === 0) {
-        console.warn(`No valid durations found for ${stageName}`);
-        return {
-          avg: 0,
-          min: 0,
-          max: 0,
-          count: 0,
-          isValid: false,
-        };
-      }
-
-      const totalDuration = durations.reduce(
-        (sum, duration) => sum + duration,
-        0,
-      );
-      const avg = totalDuration / durations.length;
-      const min = Math.min(...durations);
-      const max = Math.max(...durations);
-
+    // Helper: compute { avg, min, max, count } in minutes from an array of
+    // millisecond durations. Returns null if the array is empty.
+    const summarize = (durationsMs) => {
+      if (!durationsMs.length) return null;
+      const total = durationsMs.reduce((s, d) => s + d, 0);
       return {
-        avg: Math.round(avg / 60000), // Convert to minutes
-        min: Math.round(min / 60000),
-        max: Math.round(max / 60000),
-        count: durations.length,
-        isValid: true,
+        avg: Math.round(total / durationsMs.length / 60000),
+        min: Math.round(Math.min(...durationsMs) / 60000),
+        max: Math.round(Math.max(...durationsMs) / 60000),
+        count: durationsMs.length,
       };
     };
 
-    const pendingToPreparingStats = calculateStats(
-      pendingToPreparingDurations,
-      "pending→preparing",
-    );
-    const preparingToCompletedStats = calculateStats(
-      preparingToCompletedDurations,
-      "preparing→completed",
-    );
+    // ── Two-step: not applicable, tell the client ─────────────
+    if (flow === "two-step") {
+      return res.status(200).json({
+        flow,
+        statusFlowDisabled: true,
+        message:
+          "Status flow is disabled for this tenant — processing times are not tracked.",
+        range,
+      });
+    }
 
-    res.status(200).json({
-      // Processing time stats
-      avgPendingToPreparing: pendingToPreparingStats.avg,
-      minPendingToPreparing: pendingToPreparingStats.min,
-      maxPendingToPreparing: pendingToPreparingStats.max,
-      avgPreparingToCompleted: preparingToCompletedStats.avg,
-      minPreparingToCompleted: preparingToCompletedStats.min,
-      maxPreparingToCompleted: preparingToCompletedStats.max,
+    // ── Collect durations per transition ──────────────────────
+    // Use raw `statusTimestamps` so we don't need to re-derive statusDurations.
+    const pendingToPreparing = [];
+    const preparingToReady = [];
+    const readyToDelivered = [];
+    const pendingToDelivered = [];
+    const placedToDelivered = [];
+    const preparingToCompleted = [];
 
-      // Metadata
-      orderCount: orders.length,
-      validPendingToPreparingCount: pendingToPreparingStats.count,
-      validPreparingToCompletedCount: preparingToCompletedStats.count,
-      skippedOrders,
-      startDate: queryStartDate.toISOString().split("T")[0],
-      endDate: queryEndDate.toISOString().split("T")[0],
+    for (const o of orders) {
+      const ts = o.statusTimestamps || {};
+      const pend = ts.pending || ts.placed;
+      const prep = ts.preparing;
+      const ready = ts.ready;
+      const deliv = ts.delivered;
+      const comp = ts.completed;
 
-      // Validity flags
-      hasValidPendingToPreparing: pendingToPreparingStats.isValid,
-      hasValidPreparingToCompleted: preparingToCompletedStats.isValid,
+      const diffMs = (a, b) => {
+        if (!a || !b) return null;
+        const d = new Date(b).getTime() - new Date(a).getTime();
+        return d > 0 ? d : null;
+      };
+
+      if (flow === "three-step") {
+        const a = diffMs(pend, prep);
+        const b = diffMs(prep, comp);
+        if (a != null) pendingToPreparing.push(a);
+        if (b != null) preparingToCompleted.push(b);
+      } else if (flow === "four-step") {
+        const a = diffMs(pend, prep);
+        const b = diffMs(prep, ready);
+        const c = diffMs(ready, deliv);
+        const d = diffMs(pend, deliv);
+        if (a != null) pendingToPreparing.push(a);
+        if (b != null) preparingToReady.push(b);
+        if (c != null) readyToDelivered.push(c);
+        if (d != null) pendingToDelivered.push(d);
+      } else if (flow === "delivery-only") {
+        const a = diffMs(ts.placed, deliv);
+        if (a != null) placedToDelivered.push(a);
+      }
+    }
+
+    // ── Response ──────────────────────────────────────────────
+    if (flow === "three-step") {
+      return res.status(200).json({
+        flow,
+        range,
+        pendingToPreparing: summarize(pendingToPreparing),
+        preparingToCompleted: summarize(preparingToCompleted),
+      });
+    }
+
+    if (flow === "four-step") {
+      return res.status(200).json({
+        flow,
+        range,
+        pendingToPreparing: summarize(pendingToPreparing),
+        preparingToReady: summarize(preparingToReady),
+        readyToDelivered: summarize(readyToDelivered),
+        pendingToDelivered: summarize(pendingToDelivered),
+      });
+    }
+
+    if (flow === "delivery-only") {
+      return res.status(200).json({
+        flow,
+        range,
+        placedToDelivered: summarize(placedToDelivered),
+      });
+    }
+
+    return res.status(200).json({
+      flow,
+      range,
+      message: "No processing-time data for this flow.",
     });
   } catch (error) {
     console.error("Error calculating average processing time:", error);
     res.status(500).json({
       message: "Failed to calculate average processing time",
       error: error.message,
-      details: {
-        startDate: queryStartDate.toISOString(),
-        endDate: queryEndDate.toISOString(),
-        superClientId,
-      },
     });
   }
 };
@@ -1897,6 +2055,486 @@ const getProfitByPeriod = async (req, res) => {
     });
   }
 };
+/**
+ * Staff role breakdown over a period.
+ *
+ * For each staff member, returns:
+ *   - preparedCount / preparedRevenue     (orders where preparedBy = staff)
+ *   - deliveredCount / deliveredRevenue   (orders where deliveredBy = staff)
+ *   - avgPreparingToReadyMs               (time they spent prepping)
+ *   - avgReadyToDeliveredMs               (time their deliveries took)
+ *
+ * The staff list is the union of:
+ *   - staff currently existing in the tenant (User.find role:"client")
+ *   - names found in preparedByName / deliveredByName snapshots
+ *
+ * This ensures deleted users who acted historically still appear.
+ *
+ * Body: { startDate?, endDate? }
+ * Defaults: last 30 days.
+ */
+const getStaffRoleBreakdown = async (req, res) => {
+  const superClientId = req.superClientId;
+  const { startDate, endDate } = req.body || {};
+
+  const defaultEnd = new Date();
+  defaultEnd.setHours(23, 59, 59, 999);
+  const defaultStart = new Date();
+  defaultStart.setDate(defaultStart.getDate() - 30);
+  defaultStart.setHours(0, 0, 0, 0);
+
+  const start = startDate ? new Date(startDate) : defaultStart;
+  const end = endDate ? new Date(endDate) : defaultEnd;
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    return res.status(400).json({ message: "Invalid date format" });
+  }
+
+  try {
+    // 1) Raw orders — no populate, so raw ObjectIds survive user deletion.
+    const rawOrders = await Order.find({
+      status: "archived",
+      superClientId,
+      timestamp: { $gte: start, $lte: end },
+    }).lean();
+
+    // 2) All staff currently existing in the tenant.
+    const currentStaff = await User.find({
+      role: "client",
+      superClient: superClientId,
+    })
+      .select("_id fullName staffRole")
+      .lean();
+    const currentById = new Map(currentStaff.map((s) => [String(s._id), s]));
+
+    // 3) Every user id referenced by the orders in the period, in one query.
+    const referencedIds = new Set();
+    for (const o of rawOrders) {
+      if (o.preparedBy) referencedIds.add(String(o.preparedBy));
+      if (o.deliveredBy) referencedIds.add(String(o.deliveredBy));
+    }
+    const referencedUsers = await User.find({
+      _id: { $in: Array.from(referencedIds) },
+    })
+      .select("_id fullName staffRole")
+      .lean();
+    const referencedById = new Map(
+      referencedUsers.map((u) => [String(u._id), u]),
+    );
+
+    // 4) Bucket per staff id.
+    const buckets = new Map();
+
+    const ensure = (key) => {
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          staffId: key,
+          preparedCount: 0,
+          preparedRevenue: 0,
+          deliveredCount: 0,
+          deliveredRevenue: 0,
+          preparingToReadySum: 0,
+          preparingToReadyCount: 0,
+          readyToDeliveredSum: 0,
+          readyToDeliveredCount: 0,
+          // Snapshot fallbacks captured during the loop
+          snapshotPrepared: null,
+          snapshotDelivered: null,
+        });
+      }
+      return buckets.get(key);
+    };
+
+    // Pre-seed with current staff so zero-activity staff appear.
+    for (const s of currentStaff) ensure(String(s._id));
+
+    for (const o of rawOrders) {
+      const revenue = Number(o.totalPrice) || 0;
+
+      const t_prep = o.statusTimestamps?.preparing;
+      const t_ready = o.statusTimestamps?.ready;
+      const t_deliv = o.statusTimestamps?.delivered;
+
+      if (o.preparedBy) {
+        const key = String(o.preparedBy);
+        const b = ensure(key);
+        b.preparedCount += 1;
+        b.preparedRevenue += revenue;
+        if (!b.snapshotPrepared && o.preparedByName) {
+          b.snapshotPrepared = o.preparedByName;
+        }
+        if (t_prep && t_ready) {
+          const d = new Date(t_ready).getTime() - new Date(t_prep).getTime();
+          if (d >= 0) {
+            b.preparingToReadySum += d;
+            b.preparingToReadyCount += 1;
+          }
+        }
+      }
+
+      if (o.deliveredBy) {
+        const key = String(o.deliveredBy);
+        const b = ensure(key);
+        b.deliveredCount += 1;
+        b.deliveredRevenue += revenue;
+        if (!b.snapshotDelivered && o.deliveredByName) {
+          b.snapshotDelivered = o.deliveredByName;
+        }
+        if (t_ready && t_deliv) {
+          const d = new Date(t_deliv).getTime() - new Date(t_ready).getTime();
+          if (d >= 0) {
+            b.readyToDeliveredSum += d;
+            b.readyToDeliveredCount += 1;
+          }
+        }
+      }
+    }
+
+    // 5) Format.
+    const result = [];
+    for (const [key, b] of buckets.entries()) {
+      const live = currentById.get(key) || referencedById.get(key);
+      const isDeleted = !live && key !== "__unassigned__";
+
+      const name =
+        live?.fullName ||
+        b.snapshotPrepared ||
+        b.snapshotDelivered ||
+        (isDeleted ? "Deleted staff" : "Unassigned");
+
+      const role = live?.staffRole || (isDeleted ? "unknown" : null);
+
+      const avgPrep =
+        b.preparingToReadyCount > 0
+          ? b.preparingToReadySum / b.preparingToReadyCount
+          : null;
+      const avgDeliv =
+        b.readyToDeliveredCount > 0
+          ? b.readyToDeliveredSum / b.readyToDeliveredCount
+          : null;
+
+      result.push({
+        staffId: key,
+        name,
+        role,
+        isDeleted,
+        preparedCount: b.preparedCount,
+        preparedRevenue: parseFloat(b.preparedRevenue.toFixed(2)),
+        deliveredCount: b.deliveredCount,
+        deliveredRevenue: parseFloat(b.deliveredRevenue.toFixed(2)),
+        avgPreparingToReadyMs: avgPrep != null ? Math.round(avgPrep) : null,
+        avgReadyToDeliveredMs: avgDeliv != null ? Math.round(avgDeliv) : null,
+      });
+    }
+
+    // Sort by total revenue desc.
+    result.sort(
+      (a, b) =>
+        b.preparedRevenue +
+        b.deliveredRevenue -
+        (a.preparedRevenue + a.deliveredRevenue),
+    );
+
+    return res.status(200).json({
+      range: { startDate: start, endDate: end },
+      staff: result,
+    });
+  } catch (error) {
+    console.error("Error calculating staff role breakdown:", error);
+    return res.status(500).json({
+      message: "Failed to calculate staff role breakdown",
+      error: error.message,
+    });
+  }
+};
+/**
+ * One-shot "attention snapshot" for the Order Management page.
+ *
+ * Returns everything the Exceptions panel and Staff-on-duty board need,
+ * in a single query so the client can poll refresh cheaply (every 30s)
+ * and only refetch on real events.
+ *
+ * Response shape:
+ *   {
+ *     exceptions: {
+ *       stuckPending: [...],       // pending/placed > 10 min old
+ *       stuckReady: [...],         // ready > 5 min old
+ *       unpaidTables: [...],       // tables with unpaid orders
+ *       lowStock: [...],           // raw materials at/below reorder level
+ *     },
+ *     staffOnDuty: [
+ *       {
+ *         staffId, name, role, isDeleted,
+ *         preparedToday, deliveredToday, revenueToday,
+ *         lastActivityAt,  // ISO timestamp or null
+ *       },
+ *     ],
+ *     generatedAt,
+ *   }
+ */
+const getAttentionSnapshot = async (req, res) => {
+  const superClientId = req.superClientId;
+
+  try {
+    const now = Date.now();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayMs = today.getTime();
+
+    const STUCK_PENDING_MS = 10 * 60 * 1000;
+    const STUCK_READY_MS = 5 * 60 * 1000;
+
+    // ── 1) Live orders (in-flight only) ──────────────────
+    const liveOrders = await Order.find({
+      superClientId,
+      status: {
+        $in: ["placed", "pending", "preparing", "ready", "delivered"],
+      },
+      payed: false,
+    })
+      .populate({
+        path: "table",
+        populate: { path: "plan", select: "_id name" },
+      })
+      .select(
+        "_id orderNumber orderType status timestamp statusTimestamps table totalPrice payed preparedBy deliveredBy user",
+      )
+      .lean();
+
+    const stuckPending = [];
+    const stuckReady = [];
+    const unpaidTableSet = new Map(); // tableId -> { table, unpaidTotal, oldestOrderAt }
+
+    for (const o of liveOrders) {
+      if (o.status === "pending" || o.status === "placed") {
+        const anchor =
+          o.statusTimestamps?.pending ||
+          o.statusTimestamps?.placed ||
+          o.timestamp;
+        if (anchor && now - new Date(anchor).getTime() > STUCK_PENDING_MS) {
+          stuckPending.push({
+            orderId: String(o._id),
+            orderNumber: o.orderNumber || null,
+            orderType: o.orderType || "dine-in",
+            tableNumber: o.table?.number || null,
+            planName: o.table?.plan?.name || null,
+            status: o.status,
+            ageMs: now - new Date(anchor).getTime(),
+            totalPrice: Number(o.totalPrice) || 0,
+          });
+        }
+      }
+
+      if (o.status === "ready") {
+        const anchor = o.statusTimestamps?.ready;
+        if (anchor && now - new Date(anchor).getTime() > STUCK_READY_MS) {
+          stuckReady.push({
+            orderId: String(o._id),
+            orderNumber: o.orderNumber || null,
+            orderType: o.orderType || "dine-in",
+            tableNumber: o.table?.number || null,
+            planName: o.table?.plan?.name || null,
+            ageMs: now - new Date(anchor).getTime(),
+            totalPrice: Number(o.totalPrice) || 0,
+          });
+        }
+      }
+
+      // Unpaid orders on a table -> table is due
+      if (o.table?._id && !o.payed) {
+        const key = String(o.table._id);
+        if (!unpaidTableSet.has(key)) {
+          unpaidTableSet.set(key, {
+            tableId: key,
+            tableNumber: o.table.number,
+            planName: o.table.plan?.name || null,
+            unpaidTotal: 0,
+            oldestOrderAt: o.timestamp,
+            orderCount: 0,
+          });
+        }
+        const bucket = unpaidTableSet.get(key);
+        bucket.unpaidTotal += Number(o.totalPrice) || 0;
+        bucket.orderCount += 1;
+        if (
+          o.timestamp &&
+          new Date(o.timestamp) < new Date(bucket.oldestOrderAt)
+        ) {
+          bucket.oldestOrderAt = o.timestamp;
+        }
+      }
+    }
+
+    const unpaidTables = Array.from(unpaidTableSet.values())
+      .map((t) => ({
+        ...t,
+        unpaidTotal: parseFloat(t.unpaidTotal.toFixed(2)),
+        ageMs: t.oldestOrderAt
+          ? now - new Date(t.oldestOrderAt).getTime()
+          : null,
+      }))
+      .sort((a, b) => (b.ageMs || 0) - (a.ageMs || 0));
+
+    // ── 2) Low stock ─────────────────────────────────────
+    let lowStock = [];
+    try {
+      const lowRows = await Inventory.aggregate([
+        { $match: { userId: new mongoose.Types.ObjectId(superClientId) } },
+        {
+          $lookup: {
+            from: "rawmaterials",
+            localField: "rawMaterial",
+            foreignField: "_id",
+            as: "rm",
+          },
+        },
+        { $unwind: "$rm" },
+        {
+          $match: {
+            $expr: { $lte: ["$currentQuantity", "$rm.reorderLevel"] },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            rawMaterialId: "$rm._id",
+            name: "$rm.name",
+            unit: "$rm.unit",
+            currentQuantity: 1,
+            reorderLevel: "$rm.reorderLevel",
+            deficit: { $subtract: ["$rm.reorderLevel", "$currentQuantity"] },
+          },
+        },
+        { $limit: 10 },
+      ]);
+      lowStock = lowRows;
+    } catch (e) {
+      // Inventory models may not be present in every tenant — don't fail.
+      logger.warn?.(`[ATTENTION] Low-stock aggregation skipped: ${e.message}`);
+    }
+
+    // ── 3) Staff on duty today ───────────────────────────
+    const staff = await User.find({
+      role: "client",
+      superClient: superClientId,
+      verified: true,
+    })
+      .select("_id fullName staffRole")
+      .lean();
+
+    const todayOrders = await Order.find({
+      superClientId,
+      timestamp: { $gte: today },
+    })
+      .select("totalPrice preparedBy deliveredBy user timestamp status")
+      .lean();
+
+    const statsById = new Map();
+    const ensureStat = (id) => {
+      if (!statsById.has(id)) {
+        statsById.set(id, {
+          preparedToday: 0,
+          deliveredToday: 0,
+          revenueToday: 0,
+          lastActivityAt: null,
+        });
+      }
+      return statsById.get(id);
+    };
+
+    for (const o of todayOrders) {
+      const rev = Number(o.totalPrice) || 0;
+
+      if (o.user) {
+        const s = ensureStat(String(o.user));
+        s.revenueToday += rev;
+        const t = o.timestamp ? new Date(o.timestamp) : null;
+        if (t && (!s.lastActivityAt || t > s.lastActivityAt)) {
+          s.lastActivityAt = t;
+        }
+      }
+      if (o.preparedBy) {
+        const s = ensureStat(String(o.preparedBy));
+        s.preparedToday += 1;
+      }
+      if (o.deliveredBy) {
+        const s = ensureStat(String(o.deliveredBy));
+        s.deliveredToday += 1;
+      }
+    }
+
+    const staffOnDuty = staff
+      .map((s) => {
+        const stat = statsById.get(String(s._id)) || {
+          preparedToday: 0,
+          deliveredToday: 0,
+          revenueToday: 0,
+          lastActivityAt: null,
+        };
+        return {
+          staffId: String(s._id),
+          name: s.fullName,
+          role: s.staffRole || "both",
+          isDeleted: false,
+          preparedToday: stat.preparedToday,
+          deliveredToday: stat.deliveredToday,
+          revenueToday: parseFloat(stat.revenueToday.toFixed(2)),
+          lastActivityAt: stat.lastActivityAt,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.preparedToday +
+          b.deliveredToday -
+          (a.preparedToday + a.deliveredToday),
+      );
+
+    // If the tenant has historical preparedBy/deliveredBy ids that no longer
+    // exist as users, add them as "Deleted staff" rows so the owner sees the
+    // full picture.
+    const liveIds = new Set(staffOnDuty.map((s) => s.staffId));
+    const orphanIds = new Set();
+    for (const o of todayOrders) {
+      if (o.preparedBy && !liveIds.has(String(o.preparedBy))) {
+        orphanIds.add(String(o.preparedBy));
+      }
+      if (o.deliveredBy && !liveIds.has(String(o.deliveredBy))) {
+        orphanIds.add(String(o.deliveredBy));
+      }
+    }
+    for (const id of orphanIds) {
+      const stat = statsById.get(id);
+      if (!stat) continue;
+      staffOnDuty.push({
+        staffId: id,
+        name: "Deleted staff",
+        role: "unknown",
+        isDeleted: true,
+        preparedToday: stat.preparedToday,
+        deliveredToday: stat.deliveredToday,
+        revenueToday: parseFloat(stat.revenueToday.toFixed(2)),
+        lastActivityAt: stat.lastActivityAt,
+      });
+    }
+
+    return res.status(200).json({
+      exceptions: {
+        stuckPending,
+        stuckReady,
+        unpaidTables,
+        lowStock,
+      },
+      staffOnDuty,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Error building attention snapshot:", error);
+    return res.status(500).json({
+      message: "Failed to build attention snapshot",
+      error: error.message,
+    });
+  }
+};
 module.exports = {
   getDailyRevenue,
   getMonthlyRevenue,
@@ -1924,4 +2562,6 @@ module.exports = {
   getProfitSummary,
   getProductMargins,
   getProfitByPeriod,
+  getStaffRoleBreakdown,
+  getAttentionSnapshot,
 };

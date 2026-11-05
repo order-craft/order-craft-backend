@@ -26,13 +26,10 @@ const orderSchema = new Schema({
           required: true,
         },
         productDetails: {
-          _id: {
-            type: Schema.Types.ObjectId,
-            ref: "Product",
-            required: false,
-          },
+          _id: { type: Schema.Types.ObjectId, ref: "Product", required: false },
           name: { type: String },
           price: { type: Number },
+          discountPercentage: { type: Number, default: 0 }, // ← new
         },
         quantity: {
           type: Number,
@@ -48,6 +45,10 @@ const orderSchema = new Schema({
           ref: "PaymentMethod",
           required: false,
         },
+        paymentMethodName: {
+          type: String,
+          default: null,
+        },
         paymentSplits: [
           {
             quantity: { type: Number, required: true },
@@ -55,6 +56,10 @@ const orderSchema = new Schema({
               type: Schema.Types.ObjectId,
               ref: "PaymentMethod",
               required: true,
+            },
+            paymentMethodName: {
+              type: String,
+              default: null,
             },
             paidAt: { type: Date, default: Date.now },
           },
@@ -135,14 +140,28 @@ const orderSchema = new Schema({
   },
 
   // Who performed the operational transitions
+  // Who performed the operational transitions.
+  // The ObjectId is the reference to the User document.
+  // The *ByName fields are an immutable snapshot of the actor's `fullName`
+  // at the moment of the action. This is what historical reports read,
+  // so a staff member can be deleted, renamed, or reassigned later without
+  // losing or rewriting the past.
   preparedBy: {
     type: Schema.Types.ObjectId,
     ref: "User",
     default: null,
   },
+  preparedByName: {
+    type: String,
+    default: null,
+  },
   deliveredBy: {
     type: Schema.Types.ObjectId,
     ref: "User",
+    default: null,
+  },
+  deliveredByName: {
+    type: String,
     default: null,
   },
   deliveredAt: {
@@ -297,6 +316,7 @@ orderSchema.pre("save", async function (next) {
           _id: product._id,
           name: product.name,
           price: product.price,
+          discountPercentage: product.discountPercentage || 0,
         };
       }
     }

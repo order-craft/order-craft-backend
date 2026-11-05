@@ -24,58 +24,80 @@ const verifyToken = require("../middleWares/jerifyToken");
 const verifyClientOrSuperClientOrTable = require("../middleWares/verifyClientOrSuperClientOrTable");
 const router = express.Router();
 
-// Define routes for User model
+// ════════════════════════════════════════════════════════════════════
+// POST routes
+// ════════════════════════════════════════════════════════════════════
 router.post("/", decodeTableToken, createOrder);
 router.post("/manual", verifyClientOrSuperClient, createOrder);
 
-router.post("/:orderId/rate", decodeTableToken, rateOrderProducts);
-router.post("/:orderId/tips", decodeTableToken, tipOrder);
-router.put("/:orderId", verifyClientOrSuperClientOrTable, updateOrder);
-router.patch(
-  "/update-status/:orderId",
-  verifyClientOrSuperClient,
-  updateOrderStatus
-);
-
-router.delete("/:orderId", verifyToken, deleteOrder);
-//delete all cancelled orders for a specific superClient
-router.delete(
-  "/delete/cancelled",
-  verifyClientOrSuperClient,
-  deleteCancelledOrders
-);
-
-router.get("/:orderId", decodeTableToken, getOrder);
-router.get("/", decodeTableToken, getAllOrders);
+// ════════════════════════════════════════════════════════════════════
+// Static GET routes MUST come before "/:orderId" so they are not
+// shadowed by the parameterized route.
+// ════════════════════════════════════════════════════════════════════
 router.get("/dineIn/today", verifyClientOrSuperClient, getNonDineInOrdersToday);
-//router.get("/client", getAllOrders);
+router.get("/takeaway", verifyClientOrSuperClient, getNonDineInOrdersToday);
 router.get(
   "/orders/ordersfifo",
   verifyClientOrSuperClient,
-  getOrdersBySuperClientIdFIFO
+  getOrdersBySuperClientIdFIFO,
 );
 
-// router.put("/:orderId/increase/:productId", increaseProductQuantity);
-// router.put("/:orderId/decrease/:productId", decreaseProductQuantity);
+// ── Parameterized GET routes (must come last) ──────────────────────
+router.get("/", decodeTableToken, getAllOrders);
+router.get("/:orderId", decodeTableToken, getOrder);
+
+// ════════════════════════════════════════════════════════════════════
+// POST routes with parameters
+// ════════════════════════════════════════════════════════════════════
+router.post("/:orderId/rate", decodeTableToken, rateOrderProducts);
+router.post("/:orderId/tips", decodeTableToken, tipOrder);
+
+// ════════════════════════════════════════════════════════════════════
+// PUT routes
+// ════════════════════════════════════════════════════════════════════
+// Static confirm routes first
 router.put(
   "/confirm/confirm-payment",
   verifyClientOrSuperClient,
-  confirmSelectedPayments
+  confirmSelectedPayments,
 );
 router.put(
   "/confirm/confirm-products-payment",
   verifyClientOrSuperClient,
-  confirmSelectedProductsPayments
+  confirmSelectedProductsPayments,
 );
 router.put(
   "/confirm/confirm-notdinein-products-payment",
   verifyClientOrSuperClient,
-  confirmSelectedNotDineinProductsPayments
+  confirmSelectedNotDineinProductsPayments,
 );
 router.put(
   "/confirm/confirm-notdinein-payment",
   verifyClientOrSuperClient,
-  confirmNotDineinSelectedOrder
+  confirmNotDineinSelectedOrder,
 );
+
+// Then the parameterized update
+router.put("/:orderId", verifyClientOrSuperClientOrTable, updateOrder);
+
+// ════════════════════════════════════════════════════════════════════
+// PATCH routes
+// ════════════════════════════════════════════════════════════════════
+router.patch(
+  "/update-status/:orderId",
+  verifyClientOrSuperClient,
+  updateOrderStatus,
+);
+
+// ════════════════════════════════════════════════════════════════════
+// DELETE routes
+// ════════════════════════════════════════════════════════════════════
+// Static delete first, then the parameterized one
+router.delete(
+  "/delete/cancelled",
+  verifyClientOrSuperClient,
+  deleteCancelledOrders,
+);
+router.delete("/:orderId", verifyToken, deleteOrder);
 
 module.exports = router;

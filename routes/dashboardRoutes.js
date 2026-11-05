@@ -24,6 +24,8 @@ const {
   getProfitSummary,
   getProductMargins,
   getProfitByPeriod,
+  getStaffRoleBreakdown,
+  getAttentionSnapshot,
 } = require("../controllers/DashboardingController");
 const verifySuperClient = require("../middleWares/VerifySuperClient");
 const verifyClientOrSuperClient = require("../middleWares/verifyClientOrSuperClient");
@@ -64,7 +66,7 @@ router.post(
   verifySuperClient,
   getDailyRevenuePerWaiter,
 );
-
+router.post("/staff-role-breakdown", verifySuperClient, getStaffRoleBreakdown);
 // Route to get revenue by product
 router.get("/revenue-by-product", verifySuperClient, getRevenueByProduct);
 router.get(
@@ -72,6 +74,8 @@ router.get(
   verifySuperClient,
   getRevenueByProductByMonth,
 );
+
+router.get("/attention", verifySuperClient, getAttentionSnapshot);
 
 // Route to get the most sold products
 router.get("/most-sold-products", verifySuperClient, getMostSoldProducts);
