@@ -260,6 +260,13 @@ const orderSchema = new Schema({
     ref: "PaymentMethod",
     required: false,
   },
+  // Snapshot of the payment method's name at the time of payment.
+  // Survives the deletion of the referenced PaymentMethod document so
+  // historical revenue reports never degrade to "Unknown".
+  paymentMethodName: {
+    type: String,
+    default: null,
+  },
 });
 
 // Keep the existing statusTimestamps pre-save hook
