@@ -23,6 +23,19 @@ const {
   isTerminal,
 } = require("../Helpers/orderFlow");
 
+const getStaffContext = (req) => ({
+  role: req.role === "superClient" ? "superClient" : "client",
+  staffRole:
+    req.role === "superClient" ? "superClient" : req.staffRole || "both",
+  assignedPlanIds: req.assignedPlanIds || [],
+  assignedTableIds: req.assignedTableIds || [],
+});
+// When a customer session triggers an order event, req.role is undefined and
+// req.userId equals the superClient id. We must NOT suppress the superClient
+// room in that case, or the customer app (which joins that room) won't get
+// the update. Only staff-client actors get excluded.
+const actorStaffId = (req) => (req.role === "client" ? req.userId : null);
+
 const calculateTotalPrice = async (products) => {
   const productIds = products.map((item) => item.product);
 
@@ -45,13 +58,7 @@ const calculateTotalPrice = async (products) => {
     return total + discountedPrice * item.quantity;
   }, 0);
 };
-const getStaffContext = (req) => ({
-  role: req.role === "superClient" ? "superClient" : "client",
-  staffRole:
-    req.role === "superClient" ? "superClient" : req.staffRole || "both",
-  assignedPlanIds: req.assignedPlanIds || [],
-  assignedTableIds: req.assignedTableIds || [],
-});
+
 // Fetch the actor's display name once per transition. Falls back to null if
 // the user can't be found — the snapshot fields are optional.
 const resolveActorName = async (userId, session = null) => {
@@ -590,7 +597,7 @@ const updateOrder = async (req, res) => {
       event: "orderUpdated",
       superClientId,
       order,
-      actorUserId: req.userId,
+      actorUserId: actorStaffId(req),
 
       payload: {
         ...order.toObject(),
@@ -1879,7 +1886,7 @@ const updateOrderStatus = async (req, res) => {
         event: "orderReady",
         superClientId,
         order: updatedOrder,
-        actorUserId: req.userId,
+        actorUserId: actorStaffId(req),
         payload: {
           orderId: updatedOrder._id,
           tableNumber: updatedOrder.table?.number || null,
@@ -1893,7 +1900,7 @@ const updateOrderStatus = async (req, res) => {
         event: "orderDelivered",
         superClientId,
         order: updatedOrder,
-        actorUserId: req.userId,
+        actorUserId: actorStaffId(req),
         payload: {
           orderId: updatedOrder._id,
           tableNumber: updatedOrder.table?.number || null,
@@ -1908,7 +1915,7 @@ const updateOrderStatus = async (req, res) => {
       event: "orderUpdated",
       superClientId,
       order: updatedOrder,
-      actorUserId: req.userId,
+      actorUserId: actorStaffId(req),
       payload: basePayload,
     });
 

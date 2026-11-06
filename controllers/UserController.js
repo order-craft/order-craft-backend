@@ -707,8 +707,19 @@ const updateBusinessDetails = async (req, res) => {
     if (updateData.customerEditWindow) {
       notifyPayload.customerEditWindow = updateData.customerEditWindow;
     }
-    if (typeof updateData.brandColor === "string") {
+        if (typeof updateData.brandColor === "string") {
       notifyPayload.brandColor = updateData.brandColor;
+    }
+
+    // Push the new tenant config to every open client tab of this tenant
+    // (staff + customers on `/menu`, `/orders`, etc.). Emitted to the
+    // `tenant:{id}` room which every authenticated socket joins on connect.
+    if (Object.keys(notifyPayload).length > 0) {
+      console.log(
+        `[updateBusinessDetails] emitting tenantConfigChanged to tenant:${userId}`,
+        notifyPayload,
+      );
+      req.io.to(`tenant:${userId}`).emit("tenantConfigChanged", notifyPayload);
     }
 
     logger.info(`Business details updated for user ${userId}`);

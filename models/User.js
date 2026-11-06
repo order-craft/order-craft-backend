@@ -83,10 +83,10 @@ const userSchema = new Schema({
   },
 
   // Deprecated — kept for backward compatibility. Read orderFlow instead.
-  statusFlowEnabled: {
-    type: Boolean,
-    default: true,
-  },
+  // statusFlowEnabled: {
+  //   type: Boolean,
+  //   default: true,
+  // },
 
   // ─────────────────────────────────────────────────────────────
   // Other superClient fields (unchanged)
