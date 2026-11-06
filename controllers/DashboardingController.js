@@ -1545,12 +1545,14 @@ const getAverageProcessingTime = async (req, res) => {
 
   try {
     // Load tenant to know which flow is active
-    const tenant = await User.findById(superClientId).select(
-      "orderFlow statusFlowEnabled",
-    );
+    const tenant = await User.findById(superClientId).select("orderFlow");
     const flow =
-      tenant?.orderFlow ||
-      (tenant?.statusFlowEnabled === false ? "two-step" : "three-step");
+      tenant?.orderFlow &&
+      ["two-step", "three-step", "four-step", "delivery-only"].includes(
+        tenant.orderFlow,
+      )
+        ? tenant.orderFlow
+        : "three-step";
 
     // Fetch orders in range, any non-terminal status history counts
     const orders = await Order.find({

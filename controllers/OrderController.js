@@ -170,16 +170,19 @@ const createOrder = async (req, res) => {
     }
 
     // Read tenant config once
+    // Read tenant config once
     const tenant = await User.findById(superClientId)
-      .select("statusFlowEnabled orderFlow customerEditWindow rolePermissions")
+      .select("orderFlow")
       .session(session);
 
-    // `hasExplicitFlow` tells us whether the tenant has already been migrated
-    // (they saved the new Business Details form at least once).
-    const hasExplicitFlow = !!tenant?.orderFlow;
+    // After Feature 15, every tenant has a valid orderFlow.
     const orderFlow =
-      tenant?.orderFlow ||
-      (tenant?.statusFlowEnabled === false ? "two-step" : "three-step");
+      tenant?.orderFlow &&
+      ["two-step", "three-step", "four-step", "delivery-only"].includes(
+        tenant.orderFlow,
+      )
+        ? tenant.orderFlow
+        : "three-step";
     const flowEnabled = orderFlow !== "two-step";
 
     // 5️⃣ Calculate total price
@@ -218,16 +221,11 @@ const createOrder = async (req, res) => {
     let initialTimestamps = { pending: new Date() };
 
     if (orderFlow === "two-step") {
-      // Migrated tenants use "placed" (new two-step flow).
-      // Legacy tenants (only statusFlowEnabled === false, no orderFlow saved)
-      // keep "completed" so their existing dashboards keep working.
-      if (hasExplicitFlow) {
-        initialStatus = "placed";
-        initialTimestamps = { placed: new Date() };
-      } else {
-        initialStatus = "completed";
-        initialTimestamps = { completed: new Date() };
-      }
+      // Every two-step tenant now starts new orders at "placed".
+      // (Legacy "completed" orders continue to finish normally on the finish
+      // path; only new orders get the modern initial status.)
+      initialStatus = "placed";
+      initialTimestamps = { placed: new Date() };
     } else if (orderFlow === "delivery-only") {
       initialStatus = "placed";
       initialTimestamps = { placed: new Date() };
@@ -1667,12 +1665,23 @@ const getOrdersBySuperClientIdFIFO = async (req, res) => {
       statusDurations: order.getStatusDurations(),
     }));
 
-    const tenant =
-      await User.findById(superClientId).select("statusFlowEnabled");
+    const tenant = await User.findById(superClientId).select("orderFlow");
+    const orderFlow =
+      tenant?.orderFlow &&
+      ["two-step", "three-step", "four-step", "delivery-only"].includes(
+        tenant.orderFlow,
+      )
+        ? tenant.orderFlow
+        : "three-step";
+
     res.status(200).json({
       orders: ordersWithDurations,
       plans: uniquePlans,
-      statusFlowEnabled: tenant?.statusFlowEnabled !== false,
+      orderFlow,
+      // Kept in the payload for one release cycle so older staff clients
+      // (before Feature 15 frontend) still work. Will be removed in the
+      // follow-up commit.
+      statusFlowEnabled: orderFlow !== "two-step",
     });
   } catch (error) {
     console.error("Error retrieving orders:", error);
@@ -1705,10 +1714,9 @@ const updateOrderStatus = async (req, res) => {
 
     await session.withTransaction(async () => {
       // Tenant + effective flow
+      // Tenant + effective flow
       const tenant = await User.findById(superClientId)
-        .select(
-          "statusFlowEnabled orderFlow customerEditWindow rolePermissions",
-        )
+        .select("orderFlow customerEditWindow rolePermissions")
         .session(session);
       const tenantFlow = normalizeOrderFlow(tenant);
 

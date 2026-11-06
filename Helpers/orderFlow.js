@@ -58,7 +58,9 @@ const normalizeOrderFlow = (tenant) => {
   }
   const flow = tenant.orderFlow;
   if (flow && ALLOWED_FLOWS.includes(flow)) return flow;
-  return tenant.statusFlowEnabled === false ? "two-step" : "three-step";
+  // Defensive default. After the Feature 15 backfill every tenant has a
+  // valid orderFlow, so this branch should never fire in practice.
+  return "three-step";
 };
 
 /**

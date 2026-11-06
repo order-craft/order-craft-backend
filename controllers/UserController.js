@@ -481,7 +481,7 @@ const getUserById = async (req, res) => {
 
     // Ne sélectionne que les champs non sensibles à renvoyer
     const user = await User.findById(userId).select(
-      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber statusFlowEnabled brandColor orderFlow customerEditWindow rolePermissions notificationPreferences",
+      "fullName email img role phoneNumber contractNumber percentage placeName placeLocation distance placeLogo placePicture profilePicture PlaceAddress defaultIP proxyUrl pricingPlan personalPhoneNumber brandColor orderFlow customerEditWindow rolePermissions notificationPreferences",
     );
 
     if (!user) {
@@ -497,11 +497,8 @@ const getUserById = async (req, res) => {
 
     logger.info(`Fetched sanitized data for superClient ${userId}`);
     // Normalize for legacy tenants that only have statusFlowEnabled
+    // Normalize for legacy tenants that predate the customerEditWindow config
     const userObj = user.toObject();
-    if (!userObj.orderFlow) {
-      userObj.orderFlow =
-        userObj.statusFlowEnabled === false ? "two-step" : "three-step";
-    }
     if (!userObj.customerEditWindow) {
       userObj.customerEditWindow = {
         enabled: true,
@@ -537,14 +534,8 @@ const getPlaceDetails = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const userObj = user.toObject();
-    if (!userObj.orderFlow) {
-      userObj.orderFlow =
-        userObj.statusFlowEnabled === false ? "two-step" : "three-step";
-    }
-
     logger.info(`Fetched data for user ${userId}`);
-    res.status(200).json(userObj);
+    res.status(200).json(user.toObject());
   } catch (error) {
     logger.error("Error fetching user data:", error);
     res.status(500).json({ message: "Internal server error" });
@@ -646,9 +637,9 @@ const updateBusinessDetails = async (req, res) => {
       };
     }
 
-    // Persist the order-flow flag when supplied
-    // Order flow is now the source of truth. statusFlowEnabled is kept in sync
-    // for backward compatibility during the deprecation window.
+    // `orderFlow` is the single source of truth for the tenant's workflow.
+    // The legacy `statusFlowEnabled` field is no longer written — any code
+    // still reading it (should be none) can fall back to orderFlow.
     const ALLOWED_FLOWS = [
       "two-step",
       "three-step",
@@ -658,11 +649,9 @@ const updateBusinessDetails = async (req, res) => {
 
     if (typeof orderFlow === "string" && ALLOWED_FLOWS.includes(orderFlow)) {
       updateData.orderFlow = orderFlow;
-      // Keep legacy flag in sync so untouched code paths keep working.
-      updateData.statusFlowEnabled = orderFlow === "two-step" ? false : true;
     } else if (typeof statusFlowEnabled === "boolean") {
-      // Legacy path: only statusFlowEnabled provided.
-      updateData.statusFlowEnabled = statusFlowEnabled;
+      // Legacy fallback for old admin clients that still send only the flag.
+      // Map it onto orderFlow and never touch the deprecated field.
       updateData.orderFlow = statusFlowEnabled ? "three-step" : "two-step";
     }
 
@@ -712,9 +701,6 @@ const updateBusinessDetails = async (req, res) => {
 
     // Live-notify every open client tab of this tenant
     const notifyPayload = {};
-    if (typeof updateData.statusFlowEnabled === "boolean") {
-      notifyPayload.statusFlowEnabled = updateData.statusFlowEnabled;
-    }
     if (typeof updateData.orderFlow === "string") {
       notifyPayload.orderFlow = updateData.orderFlow;
     }
@@ -723,9 +709,6 @@ const updateBusinessDetails = async (req, res) => {
     }
     if (typeof updateData.brandColor === "string") {
       notifyPayload.brandColor = updateData.brandColor;
-    }
-    if (Object.keys(notifyPayload).length > 0) {
-      req.io.to(userId.toString()).emit("tenantConfigChanged", notifyPayload);
     }
 
     logger.info(`Business details updated for user ${userId}`);
@@ -1058,11 +1041,17 @@ const qrLogin = async (req, res) => {
         logger.info(
           `[QRLOGIN] SUCCESS tableNumber=${tableData.number} superClient=${superClient} distanceOk=${Math.round(meters)}/${allowed}`,
         );
+        const ALLOWED_FLOWS = [
+          "two-step",
+          "three-step",
+          "four-step",
+          "delivery-only",
+        ];
         const effectiveOrderFlow =
-          superClientData.orderFlow ||
-          (superClientData.statusFlowEnabled === false
-            ? "two-step"
-            : "three-step");
+          superClientData.orderFlow &&
+          ALLOWED_FLOWS.includes(superClientData.orderFlow)
+            ? superClientData.orderFlow
+            : "three-step";
 
         res.json({
           token: newToken,
@@ -1072,14 +1061,15 @@ const qrLogin = async (req, res) => {
           placeLocation,
           distance,
           placeLogo,
-          statusFlowEnabled: superClientData.statusFlowEnabled !== false,
           orderFlow: effectiveOrderFlow,
+          // Kept one release cycle for older customer-app builds.
+          statusFlowEnabled: effectiveOrderFlow !== "two-step",
           customerEditWindow: superClientData.customerEditWindow || {
             enabled: true,
             minutes: 3,
             from: "placed",
           },
-          brandColor: brandColor || "#8B5A2B",
+          brandColor: brandColor || "#5A2B8B",
         });
       },
     );
